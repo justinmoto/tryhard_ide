@@ -59,6 +59,7 @@ Sidebar chat that knows the open file, the selection, and the project. Runs on a
 
 - [x] Ollama connection + status
 - [x] Chat with open file / selection context
+- [x] Prompt → auto-apply edit to open file/selection (saves to disk)
 - [ ] Richer project-wide context
 
 ### 2. Offline Codebase Q&A (RAG)
