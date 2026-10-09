@@ -12,6 +12,7 @@ import '../services/edit_proposal.dart';
 import '../services/file_resolver.dart';
 import '../services/folder_picker.dart';
 import '../services/ollama_service.dart';
+import '../services/repo_index.dart';
 import '../services/run_service.dart';
 import '../services/workspace_prefs.dart';
 import '../theme/cursor_theme.dart';
@@ -34,6 +35,7 @@ class IdeShell extends StatefulWidget {
 
 class _IdeShellState extends State<IdeShell> {
   final _ollama = OllamaService();
+  late final _repoIndex = RepoIndex(_ollama);
   final _runService = RunService();
   late final CodeController _editor = CodeController();
   final _pathController = TextEditingController();
@@ -122,7 +124,38 @@ class _IdeShellState extends State<IdeShell> {
     _editorFocus.dispose();
     _pathController.dispose();
     _runService.dispose();
+    _repoIndex.cancel();
+    _repoIndex.dispose();
     super.dispose();
+  }
+
+  /// Open [path] (if not already open) and select lines [startLine]..[endLine].
+  Future<void> _openFileAt(String path, int startLine, int endLine) async {
+    final alreadyOpen = _openPath != null && p.equals(_openPath!, path);
+    if (!alreadyOpen) await _openFile(path);
+    if (!mounted || _openPath == null || !p.equals(_openPath!, path)) return;
+    if (_isImagePreview) return;
+
+    if (_showEditorDiff) setState(() => _showEditorDiff = false);
+
+    final text = _editor.text;
+    int offsetOfLine(int line) {
+      var offset = 0;
+      for (var i = 1; i < line; i++) {
+        final next = text.indexOf('\n', offset);
+        if (next == -1) return text.length;
+        offset = next + 1;
+      }
+      return offset;
+    }
+
+    final start = offsetOfLine(startLine.clamp(1, 1 << 30));
+    var end = text.indexOf('\n', offsetOfLine(endLine.clamp(startLine, 1 << 30)));
+    if (end == -1) end = text.length;
+    _editor.selection = TextSelection(baseOffset: start, extentOffset: end);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _editorFocus.requestFocus();
+    });
   }
 
   Future<void> _quickRun() async {
@@ -628,6 +661,7 @@ class _IdeShellState extends State<IdeShell> {
 
     final chat = ChatSidebar(
       ollama: _ollama,
+      repoIndex: _repoIndex,
       rootPath: _rootPath,
       openPath: _openPath,
       openFileName: _fileName(),
@@ -636,6 +670,7 @@ class _IdeShellState extends State<IdeShell> {
       onClose: () => setState(() => _chatOpen = false),
       applyEdit: _applyEdit,
       onOpenFile: (path) => _openFile(path),
+      onOpenFileAt: _openFileAt,
       onDiscardEdit: (result) async {
         if (_editorDiff?.path == result.path) {
           await _discardEditorDiff();

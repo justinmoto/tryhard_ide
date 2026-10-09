@@ -2,9 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../services/apply_edit_result.dart';
+import '../services/chat_history_store.dart';
 import '../services/edit_proposal.dart';
 import '../services/file_resolver.dart';
 import '../services/ollama_service.dart';
+import '../services/repo_index.dart';
 import '../theme/cursor_theme.dart';
 import 'diff_result_card.dart';
 
@@ -13,10 +15,17 @@ typedef ApplyEditCallback = Future<ApplyEditResult> Function(
   String? userPrompt,
 });
 
+typedef OpenFileAtCallback = void Function(
+  String path,
+  int startLine,
+  int endLine,
+);
+
 class ChatSidebar extends StatefulWidget {
   const ChatSidebar({
     super.key,
     required this.ollama,
+    required this.repoIndex,
     required this.rootPath,
     required this.openPath,
     required this.openFileName,
@@ -25,11 +34,13 @@ class ChatSidebar extends StatefulWidget {
     required this.onClose,
     required this.applyEdit,
     required this.onOpenFile,
+    required this.onOpenFileAt,
     this.onDiscardEdit,
     this.onKeepEdit,
   });
 
   final OllamaService ollama;
+  final RepoIndex repoIndex;
   final String? rootPath;
   final String? openPath;
   final String? openFileName;
@@ -38,6 +49,7 @@ class ChatSidebar extends StatefulWidget {
   final VoidCallback onClose;
   final ApplyEditCallback applyEdit;
   final ValueChanged<String> onOpenFile;
+  final OpenFileAtCallback onOpenFileAt;
   final Future<void> Function(ApplyEditResult result)? onDiscardEdit;
   final void Function(ApplyEditResult result)? onKeepEdit;
 
@@ -46,23 +58,38 @@ class ChatSidebar extends StatefulWidget {
 }
 
 class _ChatEntry {
-  _ChatEntry.text(this.message) : result = null;
-  _ChatEntry.diff(this.result) : message = null;
+  _ChatEntry.text(
+    this.message, {
+    this.citations = const [],
+    this.isNote = false,
+  }) : result = null;
+  _ChatEntry.diff(this.result)
+      : message = null,
+        citations = const [],
+        isNote = false;
 
   final ChatMessage? message;
   final ApplyEditResult? result;
+
+  /// Clickable `file:line` sources shown under an assistant answer.
+  final List<CitationRef> citations;
+
+  /// Shown in the chat but never sent to the model (status/info bubbles).
+  final bool isNote;
 }
 
 class _ChatSidebarState extends State<ChatSidebar> {
+  static const _welcome =
+      'Local AI ready. Open a project folder — I can find files (e.g. main.dart), '
+      'answer questions about the repo with file:line sources, and auto-apply '
+      'edits with a red/green diff.';
+
   final _controller = TextEditingController();
   final _scroll = ScrollController();
   final _entries = <_ChatEntry>[
     _ChatEntry.text(
-      const ChatMessage(
-        role: 'assistant',
-        content:
-            'Local AI ready. Open a project folder — I can find files (e.g. main.dart) and auto-apply edits with a red/green diff.',
-      ),
+      const ChatMessage(role: 'assistant', content: _welcome),
+      isNote: true,
     ),
   ];
   final _history = <ChatMessage>[];
@@ -70,10 +97,18 @@ class _ChatSidebarState extends State<ChatSidebar> {
   int _requestGen = 0;
   List<String> _projectFiles = const [];
 
+  /// Retrieve relevant repo chunks (RAG) for every question.
+  bool _useRepo = true;
+  List<ChatSession> _sessions = [];
+  ChatSession _session = ChatSession.empty();
+  int _sessionsGen = 0;
+
   @override
   void initState() {
     super.initState();
     _loadProjectFiles();
+    widget.repoIndex.open(widget.rootPath);
+    _loadSessions();
   }
 
   @override
@@ -81,7 +116,103 @@ class _ChatSidebarState extends State<ChatSidebar> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.rootPath != widget.rootPath) {
       _loadProjectFiles();
+      widget.repoIndex.open(widget.rootPath);
+      _loadSessions();
     }
+  }
+
+  /// Restore the most recent chat for this workspace.
+  Future<void> _loadSessions() async {
+    final gen = ++_sessionsGen;
+    final root = widget.rootPath;
+    final sessions = await ChatHistoryStore.load(root);
+    if (!mounted || gen != _sessionsGen) return;
+    setState(() {
+      _sessions = sessions;
+      if (sessions.isNotEmpty) {
+        _restoreSession(sessions.first);
+      } else {
+        _startNewSession(greeting: _welcome);
+      }
+    });
+  }
+
+  void _restoreSession(ChatSession session) {
+    _session = session;
+    _history.clear();
+    _entries.clear();
+    for (final m in session.messages) {
+      final msg = ChatMessage(role: m.role, content: m.content);
+      _entries.add(
+        _ChatEntry.text(msg, citations: m.citations, isNote: m.isNote),
+      );
+      if (!m.isNote) _history.add(msg);
+    }
+    _entries.insert(
+      0,
+      _ChatEntry.text(
+        ChatMessage(
+          role: 'assistant',
+          content: 'Restored chat "${session.title}" '
+              '(${_formatWhen(session.updatedAt)}).',
+        ),
+        isNote: true,
+      ),
+    );
+    _scrollToEnd();
+  }
+
+  void _startNewSession({String greeting = 'New chat. How can I help?'}) {
+    _session = ChatSession.empty();
+    _history.clear();
+    _entries
+      ..clear()
+      ..add(
+        _ChatEntry.text(
+          ChatMessage(role: 'assistant', content: greeting),
+          isNote: true,
+        ),
+      );
+  }
+
+  /// Record a message in the current session and save to disk.
+  Future<void> _remember(StoredChatMessage message) async {
+    final session = _session;
+    if (session.messages.isEmpty && message.role == 'user') {
+      final firstLine = message.content.split('\n').first.trim();
+      session.title = firstLine.length > 48
+          ? '${firstLine.substring(0, 48)}…'
+          : firstLine;
+    }
+    session.messages.add(message);
+    session.updatedAt = DateTime.now();
+    if (!_sessions.contains(session)) _sessions.insert(0, session);
+    await ChatHistoryStore.save(widget.rootPath, _sessions);
+  }
+
+  Future<void> _deleteAllHistory() async {
+    setState(() {
+      _sessions = [];
+      _startNewSession();
+    });
+    await ChatHistoryStore.save(widget.rootPath, _sessions);
+  }
+
+  static String _formatWhen(DateTime t) {
+    final diff = DateTime.now().difference(t);
+    if (diff.inMinutes < 1) return 'just now';
+    if (diff.inHours < 1) return '${diff.inMinutes}m ago';
+    if (diff.inDays < 1) return '${diff.inHours}h ago';
+    if (diff.inDays < 7) return '${diff.inDays}d ago';
+    return '${t.year}-${t.month.toString().padLeft(2, '0')}-${t.day.toString().padLeft(2, '0')}';
+  }
+
+  void _scrollToEnd() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scroll.hasClients) {
+        _scroll.jumpTo(_scroll.position.maxScrollExtent);
+      }
+    });
   }
 
   Future<void> _loadProjectFiles() async {
@@ -116,13 +247,52 @@ Rules:
 - One short explanation, then File: line, then the code fence.
 - If only answering a question, no code fence.
 - Never claim you need the internet.
+
+Repository questions:
+- "Relevant code" excerpts from the repo may be provided, each line prefixed with its line number.
+- Base answers on those excerpts and cite them inline as path:line or path:start-end (e.g. lib/main.dart:12-30).
+- Only cite lines you were shown. If the excerpts don't contain the answer, say so.
 ''';
 
   void _cancel() {
     if (!_sending) return;
     _requestGen++;
     widget.ollama.cancelChat();
+    widget.repoIndex.cancel();
     setState(() => _sending = false);
+  }
+
+  /// Refresh the index (only changed files) and fetch chunks for [query].
+  Future<List<RetrievedChunk>> _retrieve(String query) async {
+    final index = widget.repoIndex;
+    if (!_useRepo || widget.rootPath == null) return const [];
+    if (!index.busy) await index.build();
+    return index.search(query, k: 6);
+  }
+
+  static String _formatChunks(List<RetrievedChunk> chunks) {
+    final b = StringBuffer();
+    for (final r in chunks) {
+      final c = r.chunk;
+      b.writeln('[${c.label}]');
+      b.writeln('```');
+      final lines = c.text.split('\n');
+      for (var i = 0; i < lines.length; i++) {
+        b.writeln('${c.startLine + i}| ${lines[i]}');
+      }
+      b.writeln('```');
+    }
+    return b.toString();
+  }
+
+  void _openCitation(CitationRef ref) {
+    final index = widget.repoIndex;
+    if (index.rootPath == null) return;
+    widget.onOpenFileAt(
+      index.absolutePath(ref.path),
+      ref.startLine,
+      ref.endLine,
+    );
   }
 
   Future<void> _send() async {
@@ -200,9 +370,6 @@ Rules:
     }
 
     final userVisible = text;
-    final prompt = contextBlock.isEmpty
-        ? text
-        : '$text\n\n---\nProject context:\n$contextBlock';
 
     final gen = ++_requestGen;
     setState(() {
@@ -211,8 +378,21 @@ Rules:
       _history.add(ChatMessage(role: 'user', content: userVisible));
       _controller.clear();
     });
+    _remember(StoredChatMessage(role: 'user', content: userVisible));
 
     try {
+      final retrieved = await _retrieve(text);
+      if (!mounted || gen != _requestGen) return;
+      if (retrieved.isNotEmpty) {
+        contextBlock
+          ..writeln()
+          ..writeln('Relevant code (cite as path:line):')
+          ..write(_formatChunks(retrieved));
+      }
+      final prompt = contextBlock.isEmpty
+          ? text
+          : '$text\n\n---\nProject context:\n$contextBlock';
+
       final messages = <ChatMessage>[
         ChatMessage(role: 'system', content: _systemPrompt),
         ..._history.take(_history.length - 1),
@@ -231,10 +411,35 @@ Rules:
         preferFileReplace: widget.selection.trim().isEmpty || wantsEdit,
       );
 
+      // Prefer what the model actually cited; otherwise list what it was given.
+      var citations = widget.repoIndex.parseCitations(trimmed);
+      if (citations.isEmpty && proposal == null) {
+        citations = [
+          for (final r in retrieved)
+            CitationRef(
+              path: r.chunk.path,
+              startLine: r.chunk.startLine,
+              endLine: r.chunk.endLine,
+            ),
+        ];
+      }
+
       setState(() {
         _history.add(ChatMessage(role: 'assistant', content: trimmed));
-        _entries.add(_ChatEntry.text(ChatMessage(role: 'assistant', content: trimmed)));
+        _entries.add(
+          _ChatEntry.text(
+            ChatMessage(role: 'assistant', content: trimmed),
+            citations: citations,
+          ),
+        );
       });
+      _remember(
+        StoredChatMessage(
+          role: 'assistant',
+          content: trimmed,
+          citations: citations,
+        ),
+      );
 
       if (proposal != null) {
         final result = await widget.applyEdit(proposal, userPrompt: text);
@@ -242,6 +447,15 @@ Rules:
         setState(() {
           _entries.add(_ChatEntry.diff(result));
         });
+        _remember(
+          StoredChatMessage(
+            role: 'assistant',
+            content: result.ok
+                ? 'Applied edit to ${result.path}'
+                : 'Edit failed: ${result.error}',
+            isNote: true,
+          ),
+        );
       } else if (wantsEdit) {
         setState(() {
           _entries.add(
@@ -251,6 +465,7 @@ Rules:
                 content:
                     'No code block found to apply. Ask again and include the file name (e.g. lib/main.dart).',
               ),
+              isNote: true,
             ),
           );
         });
@@ -277,6 +492,158 @@ Rules:
         );
       }
     }
+  }
+
+  Widget _historyMenu() {
+    return PopupMenuButton<String>(
+      tooltip: 'Chat history',
+      color: CursorColors.panel,
+      padding: EdgeInsets.zero,
+      constraints: const BoxConstraints(minWidth: 240, maxWidth: 320),
+      onSelected: (id) {
+        if (id == '__clear__') {
+          _deleteAllHistory();
+          return;
+        }
+        final session = _sessions.where((s) => s.id == id).firstOrNull;
+        if (session == null) return;
+        if (_sending) _cancel();
+        setState(() => _restoreSession(session));
+      },
+      itemBuilder: (context) {
+        final saved = _sessions.where((s) => s.messages.isNotEmpty).toList();
+        if (saved.isEmpty) {
+          return [
+            PopupMenuItem<String>(
+              enabled: false,
+              child: Text(
+                'No saved chats for this folder yet',
+                style: TextStyle(color: CursorColors.fgDim, fontSize: 12),
+              ),
+            ),
+          ];
+        }
+        return [
+          for (final s in saved)
+            PopupMenuItem<String>(
+              value: s.id,
+              height: 40,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    s.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: s.id == _session.id
+                          ? CursorColors.fgBright
+                          : CursorColors.fg,
+                      fontSize: 12,
+                      fontWeight: s.id == _session.id
+                          ? FontWeight.w600
+                          : FontWeight.normal,
+                    ),
+                  ),
+                  Text(
+                    '${_formatWhen(s.updatedAt)} · ${s.messages.where((m) => !m.isNote).length} messages',
+                    style: TextStyle(color: CursorColors.fgDim, fontSize: 10),
+                  ),
+                ],
+              ),
+            ),
+          const PopupMenuDivider(),
+          PopupMenuItem<String>(
+            value: '__clear__',
+            height: 32,
+            child: Text(
+              'Clear chat history',
+              style: TextStyle(color: CursorColors.statusOffline, fontSize: 12),
+            ),
+          ),
+        ];
+      },
+      child: Padding(
+        padding: const EdgeInsets.all(5),
+        child: Icon(Icons.history, size: 15, color: CursorColors.fgMuted),
+      ),
+    );
+  }
+
+  Widget _indexBar() {
+    return ListenableBuilder(
+      listenable: widget.repoIndex,
+      builder: (context, _) {
+        final index = widget.repoIndex;
+        final progress = index.busy && index.progressTotal > 0
+            ? index.progressDone / index.progressTotal
+            : null;
+        final warning = index.embedError;
+        return Container(
+          padding: const EdgeInsets.fromLTRB(12, 4, 6, 4),
+          decoration: BoxDecoration(
+            border: Border(bottom: BorderSide(color: CursorColors.border)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    index.hasVectors ? Icons.hub_outlined : Icons.manage_search,
+                    size: 13,
+                    color: CursorColors.fgMuted,
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      'Repo index: ${index.status}',
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(color: CursorColors.fgMuted, fontSize: 11),
+                    ),
+                  ),
+                  if (index.busy)
+                    _HeaderIcon(Icons.stop_circle_outlined, 'Stop indexing', index.cancel)
+                  else ...[
+                    _HeaderIcon(
+                      Icons.sync,
+                      index.isEmpty ? 'Index repo' : 'Update index (changed files)',
+                      () => index.build(),
+                    ),
+                    if (!index.isEmpty)
+                      _HeaderIcon(
+                        Icons.restart_alt,
+                        'Rebuild index from scratch',
+                        () => index.build(force: true),
+                      ),
+                  ],
+                ],
+              ),
+              if (index.busy) ...[
+                const SizedBox(height: 3),
+                LinearProgressIndicator(
+                  value: progress,
+                  minHeight: 2,
+                  backgroundColor: CursorColors.border,
+                  color: CursorColors.accent,
+                ),
+              ],
+              if (warning != null && !index.busy)
+                Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: Text(
+                    'Keyword search only — $warning',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(color: CursorColors.fgDim, fontSize: 10),
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
+    );
   }
 
   bool _looksLikeEditRequest(String text) {
@@ -316,20 +683,10 @@ Rules:
                       ),
                     ),
                   ),
+                  _historyMenu(),
                   _HeaderIcon(Icons.add, 'New chat', () {
-                    setState(() {
-                      _history.clear();
-                      _entries
-                        ..clear()
-                        ..add(
-                          _ChatEntry.text(
-                            const ChatMessage(
-                              role: 'assistant',
-                              content: 'New chat. How can I help?',
-                            ),
-                          ),
-                        );
-                    });
+                    if (_sending) _cancel();
+                    setState(_startNewSession);
                   }),
                   _HeaderIcon(Icons.view_sidebar_outlined, 'Close', widget.onClose),
                 ],
@@ -337,6 +694,7 @@ Rules:
             ),
           ),
           Divider(height: 1, color: CursorColors.border),
+          if (widget.rootPath != null) _indexBar(),
           if (widget.rootPath == null)
             Container(
               width: double.infinity,
@@ -396,13 +754,43 @@ Rules:
                       borderRadius: BorderRadius.circular(8),
                       border: Border.all(color: CursorColors.border),
                     ),
-                    child: SelectableText(
-                      msg.content,
-                      style: TextStyle(
-                        color: CursorColors.fg,
-                        fontSize: 13,
-                        height: 1.4,
-                      ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        SelectableText(
+                          msg.content,
+                          style: TextStyle(
+                            color: CursorColors.fg,
+                            fontSize: 13,
+                            height: 1.4,
+                          ),
+                        ),
+                        if (entry.citations.isNotEmpty) ...[
+                          const SizedBox(height: 8),
+                          Text(
+                            'Sources',
+                            style: TextStyle(
+                              color: CursorColors.fgDim,
+                              fontSize: 10,
+                              fontWeight: FontWeight.w600,
+                              letterSpacing: 0.5,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Wrap(
+                            spacing: 4,
+                            runSpacing: 4,
+                            children: [
+                              for (final c in entry.citations)
+                                _CitationChip(
+                                  label: c.label,
+                                  onTap: () => _openCitation(c),
+                                ),
+                            ],
+                          ),
+                        ],
+                      ],
                     ),
                   ),
                 );
@@ -465,6 +853,42 @@ Rules:
                           size: 16,
                           color: CursorColors.fgMuted,
                         ),
+                        const SizedBox(width: 6),
+                        Tooltip(
+                          message: _useRepo
+                              ? 'Repo context on: relevant code is retrieved and cited'
+                              : 'Repo context off',
+                          child: InkWell(
+                            onTap: () => setState(() => _useRepo = !_useRepo),
+                            borderRadius: BorderRadius.circular(4),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 6,
+                                vertical: 2,
+                              ),
+                              decoration: BoxDecoration(
+                                color: _useRepo
+                                    ? CursorColors.accent.withValues(alpha: 0.18)
+                                    : null,
+                                borderRadius: BorderRadius.circular(4),
+                                border: Border.all(
+                                  color: _useRepo
+                                      ? CursorColors.accent
+                                      : CursorColors.border,
+                                ),
+                              ),
+                              child: Text(
+                                '@repo',
+                                style: TextStyle(
+                                  color: _useRepo
+                                      ? CursorColors.fgBright
+                                      : CursorColors.fgDim,
+                                  fontSize: 11,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
                         const Spacer(),
                         Text(
                           widget.ollama.chatModel,
@@ -502,6 +926,50 @@ Rules:
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _CitationChip extends StatelessWidget {
+  const _CitationChip({required this.label, required this.onTap});
+
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: 'Open $label',
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(4),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+          decoration: BoxDecoration(
+            color: CursorColors.input,
+            borderRadius: BorderRadius.circular(4),
+            border: Border.all(color: CursorColors.border),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.description_outlined, size: 11, color: CursorColors.accentSoft),
+              const SizedBox(width: 4),
+              Flexible(
+                child: Text(
+                  label,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: CursorColors.accentSoft,
+                    fontSize: 11,
+                    fontFamily: 'Menlo',
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

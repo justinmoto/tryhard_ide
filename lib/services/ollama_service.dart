@@ -158,4 +158,37 @@ class OllamaService {
     final embedding = data['embedding'] as List<dynamic>? ?? [];
     return embedding.map((e) => (e as num).toDouble()).toList();
   }
+
+  /// Embed several texts in one request (`/api/embed`). Falls back to one
+  /// `/api/embeddings` call per text on older Ollama versions.
+  Future<List<List<double>>> embedBatch(List<String> texts) async {
+    if (texts.isEmpty) return const [];
+    final response = await http
+        .post(
+          _uri('/api/embed'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({'model': embedModel, 'input': texts}),
+        )
+        .timeout(const Duration(minutes: 2));
+
+    if (response.statusCode == 404 &&
+        !response.body.toLowerCase().contains('model')) {
+      return [for (final t in texts) await embed(t)];
+    }
+    if (response.statusCode != 200) {
+      if (response.statusCode == 404) {
+        throw Exception(
+          'Embedding model "$embedModel" not found. Pull it with: ollama pull $embedModel',
+        );
+      }
+      throw Exception('Ollama embed failed: HTTP ${response.statusCode}');
+    }
+
+    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    final embeddings = data['embeddings'] as List<dynamic>? ?? [];
+    return [
+      for (final e in embeddings)
+        (e as List<dynamic>).map((v) => (v as num).toDouble()).toList(),
+    ];
+  }
 }
