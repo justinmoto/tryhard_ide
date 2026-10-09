@@ -1,5 +1,12 @@
+import 'dart:io';
+
+import 'package:desktop_drop/desktop_drop.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:path/path.dart' as p;
+import 'package:speech_to_text/speech_to_text.dart' as stt;
 
 import '../services/apply_edit_result.dart';
 import '../services/chat_history_store.dart';
@@ -31,10 +38,13 @@ class ChatSidebar extends StatefulWidget {
     required this.openFileName,
     required this.selection,
     required this.fileContent,
+    required this.models,
     required this.onClose,
     required this.applyEdit,
     required this.onOpenFile,
     required this.onOpenFileAt,
+    required this.onModelChanged,
+    required this.onRefreshModels,
     this.onDiscardEdit,
     this.onKeepEdit,
   });
@@ -46,10 +56,13 @@ class ChatSidebar extends StatefulWidget {
   final String? openFileName;
   final String selection;
   final String fileContent;
+  final List<String> models;
   final VoidCallback onClose;
   final ApplyEditCallback applyEdit;
   final ValueChanged<String> onOpenFile;
   final OpenFileAtCallback onOpenFileAt;
+  final ValueChanged<String> onModelChanged;
+  final Future<void> Function() onRefreshModels;
   final Future<void> Function(ApplyEditResult result)? onDiscardEdit;
   final void Function(ApplyEditResult result)? onKeepEdit;
 
@@ -62,11 +75,13 @@ class _ChatEntry {
     this.message, {
     this.citations = const [],
     this.isNote = false,
+    this.workDuration,
   }) : result = null;
   _ChatEntry.diff(this.result)
       : message = null,
         citations = const [],
-        isNote = false;
+        isNote = false,
+        workDuration = null;
 
   final ChatMessage? message;
   final ApplyEditResult? result;
@@ -76,25 +91,21 @@ class _ChatEntry {
 
   /// Shown in the chat but never sent to the model (status/info bubbles).
   final bool isNote;
+
+  /// How long the model took (shown as "Worked for Xs").
+  final Duration? workDuration;
 }
 
 class _ChatSidebarState extends State<ChatSidebar> {
-  static const _welcome =
-      'Local AI ready. Open a project folder — I can find files (e.g. main.dart), '
-      'answer questions about the repo with file:line sources, and auto-apply '
-      'edits with a red/green diff.';
-
   final _controller = TextEditingController();
   final _scroll = ScrollController();
-  final _entries = <_ChatEntry>[
-    _ChatEntry.text(
-      const ChatMessage(role: 'assistant', content: _welcome),
-      isNote: true,
-    ),
-  ];
+  final _entries = <_ChatEntry>[];
   final _history = <ChatMessage>[];
+
+  bool get _isEmptyChat => _history.isEmpty && !_sending;
   bool _sending = false;
   String _statusLabel = '';
+  DateTime? _statusStartedAt;
   int _requestGen = 0;
   List<String> _projectFiles = const [];
 
@@ -104,12 +115,115 @@ class _ChatSidebarState extends State<ChatSidebar> {
   ChatSession _session = ChatSession.empty();
   int _sessionsGen = 0;
 
+  /// Paths attached as prompt context (drag/drop or picker).
+  final _attachments = <String>[];
+  bool _dragOver = false;
+  bool _pulling = false;
+  String? _pullingModel;
+
+  final stt.SpeechToText _speech = stt.SpeechToText();
+  bool _speechReady = false;
+  bool _listening = false;
+  String _voiceBase = '';
+
+  static const _maxAttachBytes = 200 * 1024;
+  static const _maxAttachChars = 12000;
+
   @override
   void initState() {
     super.initState();
     _loadProjectFiles();
     widget.repoIndex.open(widget.rootPath);
     _loadSessions();
+    _initSpeech();
+  }
+
+  Future<void> _initSpeech() async {
+    if (kIsWeb) return;
+    try {
+      final ok = await _speech.initialize(
+        onStatus: (status) {
+          if (!mounted) return;
+          if (status == 'done' || status == 'notListening') {
+            setState(() => _listening = false);
+          }
+        },
+        onError: (error) {
+          if (!mounted) return;
+          setState(() => _listening = false);
+          _entries.add(
+            _ChatEntry.text(
+              ChatMessage(
+                role: 'assistant',
+                content: 'Voice error: ${error.errorMsg}',
+              ),
+              isNote: true,
+            ),
+          );
+        },
+      );
+      if (!mounted) return;
+      setState(() => _speechReady = ok);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _speechReady = false);
+    }
+  }
+
+  Future<void> _toggleVoice() async {
+    if (kIsWeb) return;
+    if (_listening) {
+      await _speech.stop();
+      if (mounted) setState(() => _listening = false);
+      return;
+    }
+    if (!_speechReady) {
+      await _initSpeech();
+      if (!_speechReady) {
+        setState(() {
+          _entries.add(
+            _ChatEntry.text(
+              const ChatMessage(
+                role: 'assistant',
+                content:
+                    'Speech recognition unavailable. On macOS, grant Microphone '
+                    'and Speech Recognition in System Settings, then restart the app '
+                    '(first permission prompt may need a run from Xcode).',
+              ),
+              isNote: true,
+            ),
+          );
+        });
+        return;
+      }
+    }
+
+    _voiceBase = _controller.text.trimRight();
+    if (_voiceBase.isNotEmpty && !_voiceBase.endsWith(' ')) {
+      _voiceBase = '$_voiceBase ';
+    }
+    setState(() => _listening = true);
+    await _speech.listen(
+      onResult: (result) {
+        if (!mounted) return;
+        final words = result.recognizedWords.trim();
+        final next = '$_voiceBase$words';
+        _controller.value = TextEditingValue(
+          text: next,
+          selection: TextSelection.collapsed(offset: next.length),
+        );
+        if (result.finalResult) {
+          setState(() => _listening = false);
+        } else {
+          setState(() {});
+        }
+      },
+      listenOptions: stt.SpeechListenOptions(
+        listenMode: stt.ListenMode.dictation,
+        partialResults: true,
+        cancelOnError: true,
+      ),
+    );
   }
 
   @override
@@ -133,7 +247,7 @@ class _ChatSidebarState extends State<ChatSidebar> {
       if (sessions.isNotEmpty) {
         _restoreSession(sessions.first);
       } else {
-        _startNewSession(greeting: _welcome);
+        _startNewSession();
       }
     });
   }
@@ -163,17 +277,10 @@ class _ChatSidebarState extends State<ChatSidebar> {
     _scrollToEnd();
   }
 
-  void _startNewSession({String greeting = 'New chat. How can I help?'}) {
+  void _startNewSession() {
     _session = ChatSession.empty();
     _history.clear();
-    _entries
-      ..clear()
-      ..add(
-        _ChatEntry.text(
-          ChatMessage(role: 'assistant', content: greeting),
-          isNote: true,
-        ),
-      );
+    _entries.clear();
   }
 
   /// Record a message in the current session and save to disk.
@@ -226,13 +333,16 @@ class _ChatSidebarState extends State<ChatSidebar> {
   void dispose() {
     _requestGen++;
     widget.ollama.cancelChat();
+    if (_listening) {
+      _speech.stop();
+    }
     _controller.dispose();
     _scroll.dispose();
     super.dispose();
   }
 
   String get _systemPrompt => '''
-You are LocalForge, an on-device coding assistant. You edit project files; the IDE finds the file and applies your code automatically (file does not need to be open).
+You are Try Hard IDE, an on-device coding assistant. You edit project files; the IDE finds the file and applies your code automatically (file does not need to be open).
 
 When changing code, ALWAYS:
 1. Name the file on its own line: File: lib/main.dart
@@ -263,6 +373,7 @@ Repository questions:
     setState(() {
       _sending = false;
       _statusLabel = '';
+      _statusStartedAt = null;
     });
   }
 
@@ -270,6 +381,155 @@ Repository questions:
     if (!mounted) return;
     setState(() => _statusLabel = label);
     _scrollToEnd();
+  }
+
+  static String _formatDuration(Duration d) {
+    if (d.inMinutes >= 1) {
+      final s = d.inSeconds % 60;
+      return '${d.inMinutes}m ${s}s';
+    }
+    return '${d.inSeconds.clamp(1, 999)}s';
+  }
+
+  String _shortModelName(String name) {
+    final colon = name.indexOf(':');
+    if (colon <= 0) return name;
+    final base = name.substring(0, colon);
+    final tag = name.substring(colon + 1);
+    if (tag == 'latest') return base;
+    return name.length > 22 ? '$base…' : name;
+  }
+
+  Future<void> _copyText(String text) async {
+    await Clipboard.setData(ClipboardData(text: text));
+  }
+
+  String _displayPath(String path) {
+    final root = widget.rootPath;
+    if (root != null && p.isWithin(root, path)) {
+      return p.relative(path, from: root);
+    }
+    return p.basename(path);
+  }
+
+  Future<void> _attachPaths(Iterable<String> paths) async {
+    final added = <String>[];
+    for (final raw in paths) {
+      final path = raw.trim();
+      if (path.isEmpty) continue;
+      if (_attachments.contains(path)) continue;
+      final type = FileSystemEntity.typeSync(path, followLinks: false);
+      if (type != FileSystemEntityType.file) continue;
+      added.add(path);
+    }
+    if (added.isEmpty || !mounted) return;
+    setState(() => _attachments.addAll(added));
+  }
+
+  void _removeAttachment(String path) {
+    setState(() => _attachments.remove(path));
+  }
+
+  Future<void> _pickAttachments() async {
+    if (kIsWeb) return;
+    final result = await FilePicker.pickFiles(
+      allowMultiple: true,
+      dialogTitle: 'Attach files to chat',
+    );
+    if (result == null) return;
+    await _attachPaths([
+      for (final f in result.files)
+        if (f.path != null) f.path!,
+    ]);
+  }
+
+  Future<void> _pullModel(String name) async {
+    if (_pulling) return;
+    setState(() {
+      _pulling = true;
+      _pullingModel = name;
+      _entries.add(
+        _ChatEntry.text(
+          ChatMessage(
+            role: 'assistant',
+            content: 'Downloading $name…',
+          ),
+          isNote: true,
+        ),
+      );
+    });
+    _scrollToEnd();
+    try {
+      await widget.ollama.pullModel(
+        name,
+        onProgress: (status, progress) {
+          if (!mounted) return;
+          final pct = progress == null ? '' : ' ${(progress * 100).round()}%';
+          setState(() {
+            if (_entries.isNotEmpty && _entries.last.isNote) {
+              _entries[_entries.length - 1] = _ChatEntry.text(
+                ChatMessage(
+                  role: 'assistant',
+                  content: 'Downloading $name — $status$pct',
+                ),
+                isNote: true,
+              );
+            }
+          });
+        },
+      );
+      await widget.onRefreshModels();
+      if (!mounted) return;
+      widget.onModelChanged(name);
+      setState(() {
+        _entries.add(
+          _ChatEntry.text(
+            ChatMessage(
+              role: 'assistant',
+              content: 'Ready — switched to $name.',
+            ),
+            isNote: true,
+          ),
+        );
+      });
+      _scrollToEnd();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _entries.add(
+          _ChatEntry.text(
+            ChatMessage(role: 'assistant', content: 'Pull failed: $e'),
+            isNote: true,
+          ),
+        );
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _pulling = false;
+          _pullingModel = null;
+        });
+      }
+    }
+  }
+
+  Future<String> _readAttachment(String path) async {
+    try {
+      final file = File(path);
+      final len = await file.length();
+      if (len > _maxAttachBytes) {
+        return '(file too large to attach: ${(len / 1024).round()} KB)';
+      }
+      final bytes = await file.readAsBytes();
+      if (bytes.contains(0)) return '(binary file — contents omitted)';
+      var text = String.fromCharCodes(bytes);
+      if (text.length > _maxAttachChars) {
+        text = '${text.substring(0, _maxAttachChars)}\n…';
+      }
+      return text;
+    } catch (e) {
+      return '(could not read file: $e)';
+    }
   }
 
   /// Refresh the index (only changed files) and fetch chunks for [query].
@@ -306,8 +566,9 @@ Repository questions:
   }
 
   Future<void> _send() async {
-    final text = _controller.text.trim();
-    if (text.isEmpty || _sending) return;
+    final raw = _controller.text.trim();
+    if ((raw.isEmpty && _attachments.isEmpty) || _sending) return;
+    final text = raw.isEmpty ? 'Please review the attached file(s).' : raw;
 
     final status = await widget.ollama.checkStatus();
     if (!mounted) return;
@@ -379,22 +640,47 @@ Repository questions:
       contextBlock.writeln('Open file contents:\n```\n$clipped\n```');
     }
 
-    final userVisible = text;
+    final attachedPaths = List<String>.from(_attachments);
+    final attachLabels = [
+      for (final path in attachedPaths) _displayPath(path),
+    ];
+    final userVisible = attachLabels.isEmpty
+        ? text
+        : '$text\n\n${attachLabels.map((f) => '📎 $f').join('\n')}';
 
     final gen = ++_requestGen;
+    final started = DateTime.now();
     setState(() {
       _sending = true;
+      _statusStartedAt = started;
       _statusLabel = _useRepo && widget.rootPath != null
           ? 'Searching project…'
           : 'Thinking…';
       _entries.add(_ChatEntry.text(ChatMessage(role: 'user', content: userVisible)));
       _history.add(ChatMessage(role: 'user', content: userVisible));
       _controller.clear();
+      _attachments.clear();
     });
     _scrollToEnd();
     _remember(StoredChatMessage(role: 'user', content: userVisible));
 
     try {
+      if (attachedPaths.isNotEmpty) {
+        _setStatus('Reading attachments…');
+        contextBlock.writeln('Attached files (treat as primary context):');
+        for (final path in attachedPaths) {
+          final label = _displayPath(path);
+          final body = await _readAttachment(path);
+          if (!mounted || gen != _requestGen) return;
+          contextBlock
+            ..writeln()
+            ..writeln('File: $label')
+            ..writeln('```')
+            ..writeln(body)
+            ..writeln('```');
+        }
+      }
+
       final retrieved = await _retrieve(text);
       if (!mounted || gen != _requestGen) return;
       if (retrieved.isNotEmpty) {
@@ -439,12 +725,14 @@ Repository questions:
         ];
       }
 
+      final workDuration = DateTime.now().difference(started);
       setState(() {
         _history.add(ChatMessage(role: 'assistant', content: trimmed));
         _entries.add(
           _ChatEntry.text(
             ChatMessage(role: 'assistant', content: trimmed),
             citations: citations,
+            workDuration: workDuration,
           ),
         );
         if (proposal != null) {
@@ -496,13 +784,19 @@ Repository questions:
       setState(() {
         final err = ChatMessage(role: 'assistant', content: 'Error: $e');
         _history.add(err);
-        _entries.add(_ChatEntry.text(err));
+        _entries.add(
+          _ChatEntry.text(
+            err,
+            workDuration: DateTime.now().difference(started),
+          ),
+        );
       });
     } finally {
       if (mounted && gen == _requestGen) {
         setState(() {
           _sending = false;
           _statusLabel = '';
+          _statusStartedAt = null;
         });
       }
       await Future<void>.delayed(const Duration(milliseconds: 50));
@@ -687,29 +981,29 @@ Repository questions:
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           SizedBox(
-            height: 35,
+            height: 38,
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 10),
               child: Row(
                 children: [
-                  Icon(Icons.flag_outlined, size: 14, color: CursorColors.fgMuted),
-                  const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      widget.openFileName ?? 'AI Edits',
+                      _session.title.isEmpty || _session.messages.isEmpty
+                          ? (widget.openFileName ?? 'New chat')
+                          : _session.title,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                        color: CursorColors.fg,
+                        color: CursorColors.fgBright,
                         fontSize: 12,
                         fontWeight: FontWeight.w500,
                       ),
                     ),
                   ),
-                  _historyMenu(),
                   _HeaderIcon(Icons.add, 'New chat', () {
                     if (_sending) _cancel();
                     setState(_startNewSession);
                   }),
+                  _historyMenu(),
                   _HeaderIcon(Icons.view_sidebar_outlined, 'Close', widget.onClose),
                 ],
               ),
@@ -737,217 +1031,355 @@ Repository questions:
                 style: TextStyle(color: CursorColors.fgMuted, fontSize: 11),
               ),
             ),
-          Expanded(
-            child: ListView.builder(
-              controller: _scroll,
-              padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
-              itemCount: _entries.length + (_sending ? 1 : 0),
-              itemBuilder: (context, index) {
-                if (_sending && index == _entries.length) {
-                  return _ThinkingBubble(label: _statusLabel);
-                }
-                final entry = _entries[index];
-                if (entry.result != null) {
-                  final r = entry.result!;
-                  return DiffResultCard(
-                    result: r,
-                    onOpen: widget.onOpenFile,
-                    onDiscard: r.ok && widget.onDiscardEdit != null
-                        ? () => widget.onDiscardEdit!(r)
-                        : null,
-                    onKeep: r.ok && widget.onKeepEdit != null
-                        ? () => widget.onKeepEdit!(r)
-                        : null,
+          if (_isEmptyChat)
+            Expanded(child: _emptyChat())
+          else ...[
+            Expanded(
+              child: ListView.builder(
+                controller: _scroll,
+                padding: const EdgeInsets.fromLTRB(14, 14, 14, 8),
+                itemCount: _entries.length + (_sending ? 1 : 0),
+                itemBuilder: (context, index) {
+                  if (_sending && index == _entries.length) {
+                    return _StatusLine(
+                      label: _statusLabel.isEmpty ? 'Thinking…' : _statusLabel,
+                      loading: true,
+                      startedAt: _statusStartedAt,
+                      formatDuration: _formatDuration,
+                    );
+                  }
+                  final entry = _entries[index];
+                  if (entry.result != null) {
+                    final r = entry.result!;
+                    return DiffResultCard(
+                      result: r,
+                      onOpen: widget.onOpenFile,
+                      onDiscard: r.ok && widget.onDiscardEdit != null
+                          ? () => widget.onDiscardEdit!(r)
+                          : null,
+                      onKeep: r.ok && widget.onKeepEdit != null
+                          ? () => widget.onKeepEdit!(r)
+                          : null,
+                    );
+                  }
+                  return _MessageBlock(
+                    entry: entry,
+                    onOpenCitation: _openCitation,
+                    onCopy: () => _copyText(entry.message!.content),
+                    formatDuration: _formatDuration,
                   );
-                }
-                final msg = entry.message!;
-                final isUser = msg.role == 'user';
-                return Align(
-                  alignment:
-                      isUser ? Alignment.centerRight : Alignment.centerLeft,
-                  child: Container(
-                    margin: const EdgeInsets.only(bottom: 10),
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 10,
-                    ),
-                    constraints: const BoxConstraints(maxWidth: 340),
-                    decoration: BoxDecoration(
-                      color: isUser
-                          ? CursorColors.chatUser
-                          : CursorColors.hover,
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: CursorColors.border),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        SelectableText(
-                          msg.content,
-                          style: TextStyle(
-                            color: CursorColors.fg,
-                            fontSize: 13,
-                            height: 1.4,
-                          ),
-                        ),
-                        if (entry.citations.isNotEmpty) ...[
-                          const SizedBox(height: 8),
-                          Text(
-                            'Sources',
-                            style: TextStyle(
-                              color: CursorColors.fgDim,
-                              fontSize: 10,
-                              fontWeight: FontWeight.w600,
-                              letterSpacing: 0.5,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          Wrap(
-                            spacing: 4,
-                            runSpacing: 4,
-                            children: [
-                              for (final c in entry.citations)
-                                _CitationChip(
-                                  label: c.label,
-                                  onTap: () => _openCitation(c),
-                                ),
-                            ],
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
-                );
-              },
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
-            child: Container(
-              decoration: BoxDecoration(
-                color: CursorColors.input,
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: CursorColors.border),
+                },
               ),
+            ),
+            if (widget.rootPath != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 0, 14, 6),
+                child: Row(
+                  children: [
+                    Icon(Icons.chevron_right, size: 14, color: CursorColors.fgDim),
+                    Text(
+                      '${_projectFiles.length} Files',
+                      style: TextStyle(color: CursorColors.fgMuted, fontSize: 11),
+                    ),
+                    const Spacer(),
+                    if (widget.selection.trim().isNotEmpty)
+                      Text(
+                        'Selection · ready',
+                        style: TextStyle(color: CursorColors.fgDim, fontSize: 11),
+                      ),
+                  ],
+                ),
+              ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+              child: _buildComposer(minLines: 2, maxLines: 6),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _emptyChat() {
+    return Align(
+      alignment: Alignment.topCenter,
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(12, 12, 12, 24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _buildComposer(minLines: 3, maxLines: 8, emptyStyle: true),
+            const SizedBox(height: 28),
+            Center(
               child: Column(
                 children: [
-                  Focus(
-                    onKeyEvent: (node, event) {
-                      if (event is! KeyDownEvent) {
-                        return KeyEventResult.ignored;
-                      }
-                      final isEnter =
-                          event.logicalKey == LogicalKeyboardKey.enter ||
-                          event.logicalKey == LogicalKeyboardKey.numpadEnter;
-                      if (!isEnter) return KeyEventResult.ignored;
-                      if (HardwareKeyboard.instance.isShiftPressed) {
-                        return KeyEventResult.ignored;
-                      }
-                      _send();
-                      return KeyEventResult.handled;
-                    },
-                    child: TextField(
-                      controller: _controller,
-                      minLines: 2,
-                      maxLines: 5,
-                      textInputAction: TextInputAction.newline,
-                      style: TextStyle(
-                        color: CursorColors.fgBright,
-                        fontSize: 13,
-                      ),
-                      decoration: InputDecoration(
-                        hintText:
-                            'e.g. rewrite lib/main.dart as a cafe dashboard…',
-                        hintStyle: TextStyle(
-                          color: CursorColors.fgDim,
-                          fontSize: 13,
-                        ),
-                        border: InputBorder.none,
-                        contentPadding:
-                            const EdgeInsets.fromLTRB(12, 10, 12, 4),
-                      ),
+                  Image.asset(
+                    'logo.png',
+                    width: 36,
+                    height: 36,
+                    errorBuilder: (context, error, stackTrace) => Icon(
+                      Icons.auto_awesome,
+                      size: 28,
+                      color: CursorColors.fgMuted,
                     ),
                   ),
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(6, 0, 6, 6),
-                    child: Row(
-                      children: [
-                        Icon(
-                          Icons.auto_fix_high,
-                          size: 16,
-                          color: CursorColors.fgMuted,
-                        ),
-                        const SizedBox(width: 6),
-                        Tooltip(
-                          message: _useRepo
-                              ? 'Repo context on: relevant code is retrieved and cited'
-                              : 'Repo context off',
-                          child: InkWell(
-                            onTap: () => setState(() => _useRepo = !_useRepo),
-                            borderRadius: BorderRadius.circular(4),
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 6,
-                                vertical: 2,
-                              ),
-                              decoration: BoxDecoration(
-                                color: _useRepo
-                                    ? CursorColors.accent.withValues(alpha: 0.18)
-                                    : null,
-                                borderRadius: BorderRadius.circular(4),
-                                border: Border.all(
-                                  color: _useRepo
-                                      ? CursorColors.accent
-                                      : CursorColors.border,
-                                ),
-                              ),
-                              child: Text(
-                                '@repo',
-                                style: TextStyle(
-                                  color: _useRepo
-                                      ? CursorColors.fgBright
-                                      : CursorColors.fgDim,
-                                  fontSize: 11,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                        const Spacer(),
-                        Text(
-                          widget.ollama.chatModel,
-                          style: TextStyle(
-                            color: CursorColors.fgDim,
-                            fontSize: 11,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Tooltip(
-                          message: _sending ? 'Stop' : 'Send',
-                          child: InkWell(
-                            onTap: _sending ? _cancel : _send,
-                            borderRadius: BorderRadius.circular(6),
-                            child: Container(
-                              width: 28,
-                              height: 28,
-                              decoration: BoxDecoration(
-                                color: CursorColors.accent,
-                                borderRadius: BorderRadius.circular(6),
-                              ),
-                              child: Icon(
-                                _sending ? Icons.stop_rounded : Icons.arrow_upward,
-                                size: 16,
-                                color: Colors.white,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
+                  const SizedBox(height: 10),
+                  Text(
+                    'Try Hard IDE',
+                    style: TextStyle(
+                      color: CursorColors.fgMuted,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w500,
                     ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    widget.rootPath == null
+                        ? 'Open a folder, then plan and build locally'
+                        : 'Plan, search, and edit this project',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: CursorColors.fgDim, fontSize: 11),
                   ),
                 ],
               ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildComposer({
+    int minLines = 2,
+    int maxLines = 6,
+    bool emptyStyle = false,
+  }) {
+    final highlight = _dragOver;
+    final box = Container(
+      decoration: BoxDecoration(
+        color: highlight
+            ? CursorColors.accent.withValues(alpha: 0.08)
+            : CursorColors.input,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: highlight ? CursorColors.accent : CursorColors.border,
+          width: highlight ? 1.5 : 1,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (_attachments.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(10, 10, 10, 0),
+              child: Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  for (final path in _attachments)
+                    _AttachmentChip(
+                      label: _displayPath(path),
+                      onRemove: () => _removeAttachment(path),
+                    ),
+                ],
+              ),
+            ),
+          Focus(
+            onKeyEvent: (node, event) {
+              if (event is! KeyDownEvent) return KeyEventResult.ignored;
+              final isEnter =
+                  event.logicalKey == LogicalKeyboardKey.enter ||
+                  event.logicalKey == LogicalKeyboardKey.numpadEnter;
+              if (!isEnter) return KeyEventResult.ignored;
+              if (HardwareKeyboard.instance.isShiftPressed) {
+                return KeyEventResult.ignored;
+              }
+              _send();
+              return KeyEventResult.handled;
+            },
+            child: TextField(
+              controller: _controller,
+              autofocus: emptyStyle,
+              minLines: minLines,
+              maxLines: maxLines,
+              textInputAction: TextInputAction.newline,
+              style: TextStyle(
+                color: CursorColors.fgBright,
+                fontSize: 13,
+                height: 1.4,
+              ),
+              decoration: InputDecoration(
+                hintText: _listening
+                    ? 'Listening… speak your prompt'
+                    : highlight
+                        ? 'Drop files to attach as context…'
+                        : 'Plan, Build, / for skills, @ for context',
+                hintStyle: TextStyle(
+                  color: CursorColors.fgDim,
+                  fontSize: 13,
+                ),
+                border: InputBorder.none,
+                contentPadding: const EdgeInsets.fromLTRB(14, 14, 14, 8),
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+            child: Row(
+              children: [
+                _ModePill(
+                  label: '∞',
+                  selected: _useRepo,
+                  onTap: () => setState(() => _useRepo = !_useRepo),
+                  tooltip: _useRepo
+                      ? 'Agent: retrieve repo context and apply edits'
+                      : 'Ask: answer without repo retrieval',
+                ),
+                const SizedBox(width: 4),
+                _ModelPicker(
+                  model: widget.ollama.chatModel,
+                  models: widget.models,
+                  shortName: _shortModelName,
+                  onChanged: widget.onModelChanged,
+                  onPull: _pulling ? null : _pullModel,
+                  pullingModel: _pullingModel,
+                  asText: true,
+                ),
+                const Spacer(),
+                Tooltip(
+                  message: 'Attach files',
+                  child: InkWell(
+                    onTap: kIsWeb ? null : _pickAttachments,
+                    borderRadius: BorderRadius.circular(4),
+                    child: Padding(
+                      padding: const EdgeInsets.all(5),
+                      child: Icon(
+                        Icons.attach_file,
+                        size: 16,
+                        color: CursorColors.fgMuted,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 2),
+                Tooltip(
+                  message: _listening ? 'Stop listening' : 'Voice input',
+                  child: InkWell(
+                    onTap: kIsWeb || _sending ? null : _toggleVoice,
+                    customBorder: const CircleBorder(),
+                    child: Container(
+                      width: 28,
+                      height: 28,
+                      decoration: BoxDecoration(
+                        color: _listening
+                            ? CursorColors.statusOffline.withValues(alpha: 0.2)
+                            : CursorColors.hover,
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: _listening
+                              ? CursorColors.statusOffline
+                              : CursorColors.border,
+                        ),
+                      ),
+                      child: Icon(
+                        _listening ? Icons.mic : Icons.mic_none_outlined,
+                        size: 15,
+                        color: _listening
+                            ? CursorColors.statusOffline
+                            : CursorColors.fgMuted,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 4),
+                Tooltip(
+                  message: _sending ? 'Stop' : 'Send',
+                  child: InkWell(
+                    onTap: _sending ? _cancel : _send,
+                    customBorder: const CircleBorder(),
+                    child: Container(
+                      width: 28,
+                      height: 28,
+                      decoration: BoxDecoration(
+                        color: _sending
+                            ? CursorColors.fgMuted
+                            : CursorColors.fgBright,
+                        shape: BoxShape.circle,
+                      ),
+                      child: Icon(
+                        _sending
+                            ? Icons.stop_rounded
+                            : Icons.arrow_upward_rounded,
+                        size: 15,
+                        color: CursorColors.sidebar,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+
+    return DropTarget(
+      onDragEntered: (_) => setState(() => _dragOver = true),
+      onDragExited: (_) => setState(() => _dragOver = false),
+      onDragDone: (detail) async {
+        setState(() => _dragOver = false);
+        await _attachPaths([for (final f in detail.files) f.path]);
+      },
+      child: DragTarget<String>(
+        onWillAcceptWithDetails: (details) {
+          setState(() => _dragOver = true);
+          return true;
+        },
+        onLeave: (_) => setState(() => _dragOver = false),
+        onAcceptWithDetails: (details) {
+          setState(() => _dragOver = false);
+          _attachPaths([details.data]);
+        },
+        builder: (context, candidate, rejected) => box,
+      ),
+    );
+  }
+}
+
+class _AttachmentChip extends StatelessWidget {
+  const _AttachmentChip({required this.label, required this.onRemove});
+
+  final String label;
+  final VoidCallback onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 220),
+      padding: const EdgeInsets.only(left: 8, right: 2, top: 3, bottom: 3),
+      decoration: BoxDecoration(
+        color: CursorColors.hover,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: CursorColors.border),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.insert_drive_file_outlined, size: 12, color: CursorColors.fgMuted),
+          const SizedBox(width: 5),
+          Flexible(
+            child: Text(
+              label,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: CursorColors.fg, fontSize: 11),
+            ),
+          ),
+          InkWell(
+            onTap: onRemove,
+            borderRadius: BorderRadius.circular(10),
+            child: Padding(
+              padding: const EdgeInsets.all(3),
+              child: Icon(Icons.close, size: 13, color: CursorColors.fgDim),
             ),
           ),
         ],
@@ -956,71 +1388,425 @@ Repository questions:
   }
 }
 
-class _ThinkingBubble extends StatefulWidget {
-  const _ThinkingBubble({required this.label});
+class _MessageBlock extends StatelessWidget {
+  const _MessageBlock({
+    required this.entry,
+    required this.onOpenCitation,
+    required this.onCopy,
+    required this.formatDuration,
+  });
 
-  final String label;
-
-  @override
-  State<_ThinkingBubble> createState() => _ThinkingBubbleState();
-}
-
-class _ThinkingBubbleState extends State<_ThinkingBubble>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _pulse = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 900),
-  )..repeat(reverse: true);
-
-  @override
-  void dispose() {
-    _pulse.dispose();
-    super.dispose();
-  }
+  final _ChatEntry entry;
+  final ValueChanged<CitationRef> onOpenCitation;
+  final VoidCallback onCopy;
+  final String Function(Duration) formatDuration;
 
   @override
   Widget build(BuildContext context) {
-    final label = widget.label.isEmpty ? 'Working…' : widget.label;
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: FadeTransition(
-        opacity: Tween<double>(begin: 0.55, end: 1).animate(
-          CurvedAnimation(parent: _pulse, curve: Curves.easeInOut),
-        ),
-        child: Container(
-          margin: const EdgeInsets.only(bottom: 10),
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          constraints: const BoxConstraints(maxWidth: 340),
-          decoration: BoxDecoration(
-            color: CursorColors.hover,
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: CursorColors.border),
+    final msg = entry.message!;
+    final isUser = msg.role == 'user';
+
+    if (isUser) {
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 14),
+        child: Align(
+          alignment: Alignment.centerLeft,
+          child: Container(
+            width: double.infinity,
+            padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+            decoration: BoxDecoration(
+              color: CursorColors.chatUser,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: CursorColors.border),
+            ),
+            child: SelectableText(
+              msg.content,
+              style: TextStyle(
+                color: CursorColors.fgBright,
+                fontSize: 13,
+                height: 1.45,
+              ),
+            ),
           ),
+        ),
+      );
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (entry.workDuration != null)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Text(
+                'Worked for ${formatDuration(entry.workDuration!)}',
+                style: TextStyle(
+                  color: CursorColors.fgDim,
+                  fontSize: 12,
+                  fontStyle: FontStyle.italic,
+                ),
+              ),
+            ),
+          SelectableText(
+            msg.content,
+            style: TextStyle(
+              color: CursorColors.fg,
+              fontSize: 13,
+              height: 1.5,
+            ),
+          ),
+          if (entry.citations.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 4,
+              runSpacing: 4,
+              children: [
+                for (final c in entry.citations)
+                  _CitationChip(
+                    label: c.label,
+                    onTap: () => onOpenCitation(c),
+                  ),
+              ],
+            ),
+          ],
+          if (!entry.isNote) ...[
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                _ActionIcon(
+                  icon: Icons.copy_outlined,
+                  tooltip: 'Copy',
+                  onTap: onCopy,
+                ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _StatusLine extends StatefulWidget {
+  const _StatusLine({
+    required this.label,
+    this.loading = false,
+    this.startedAt,
+    this.formatDuration,
+  });
+
+  final String label;
+  final bool loading;
+  final DateTime? startedAt;
+  final String Function(Duration)? formatDuration;
+
+  @override
+  State<_StatusLine> createState() => _StatusLineState();
+}
+
+class _StatusLineState extends State<_StatusLine> {
+  late final ticker = Stream.periodic(const Duration(seconds: 1));
+
+  @override
+  Widget build(BuildContext context) {
+    final started = widget.startedAt;
+    final format = widget.formatDuration;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12, top: 2),
+      child: Row(
+        children: [
+          if (widget.loading) ...[
+            SizedBox(
+              width: 12,
+              height: 12,
+              child: CircularProgressIndicator(
+                strokeWidth: 1.5,
+                color: CursorColors.fgDim,
+              ),
+            ),
+            const SizedBox(width: 8),
+          ],
+          Flexible(
+            child: started != null && format != null
+                ? StreamBuilder(
+                    stream: ticker,
+                    builder: (context, _) {
+                      final elapsed = DateTime.now().difference(started);
+                      return Text(
+                        '${widget.label} · ${format(elapsed)}',
+                        style: TextStyle(
+                          color: CursorColors.fgDim,
+                          fontSize: 12,
+                          fontStyle: FontStyle.italic,
+                        ),
+                      );
+                    },
+                  )
+                : Text(
+                    widget.label,
+                    style: TextStyle(
+                      color: CursorColors.fgDim,
+                      fontSize: 12,
+                      fontStyle: FontStyle.italic,
+                    ),
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ModelPicker extends StatelessWidget {
+  const _ModelPicker({
+    required this.model,
+    required this.models,
+    required this.shortName,
+    required this.onChanged,
+    this.onPull,
+    this.pullingModel,
+    this.asText = false,
+  });
+
+  final String model;
+  final List<String> models;
+  final String Function(String) shortName;
+  final ValueChanged<String> onChanged;
+  final Future<void> Function(String name)? onPull;
+  final String? pullingModel;
+  final bool asText;
+
+  @override
+  Widget build(BuildContext context) {
+    final installed = models.toSet();
+    final catalog = OllamaService.catalog(models);
+    final label = models.isEmpty
+        ? (pullingModel != null ? 'Pulling…' : 'Add model')
+        : shortName(model);
+    final child = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (!asText) ...[
+          Icon(Icons.auto_awesome, size: 13, color: CursorColors.fgMuted),
+          const SizedBox(width: 5),
+        ],
+        Flexible(
+          child: Text(
+            label,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: CursorColors.fg,
+              fontSize: asText ? 12 : 11,
+              fontWeight: asText ? FontWeight.w500 : FontWeight.normal,
+            ),
+          ),
+        ),
+        Icon(Icons.expand_more, size: 14, color: CursorColors.fgDim),
+      ],
+    );
+
+    return PopupMenuButton<String>(
+      tooltip: 'Model',
+      onSelected: (value) {
+        if (value.startsWith('pull:')) {
+          onPull?.call(value.substring(5));
+          return;
+        }
+        onChanged(value);
+      },
+      color: CursorColors.panel,
+      offset: const Offset(0, -8),
+      itemBuilder: (context) {
+        final items = <PopupMenuEntry<String>>[
+          PopupMenuItem(
+            enabled: false,
+            height: 28,
+            child: Text(
+              'Installed',
+              style: TextStyle(color: CursorColors.fgDim, fontSize: 10),
+            ),
+          ),
+        ];
+        final ready = catalog.where(installed.contains).toList();
+        if (ready.isEmpty) {
+          items.add(
+            PopupMenuItem(
+              enabled: false,
+              height: 32,
+              child: Text(
+                'None yet — pull one below',
+                style: TextStyle(color: CursorColors.fgMuted, fontSize: 11),
+              ),
+            ),
+          );
+        } else {
+          for (final name in ready) {
+            items.add(
+              PopupMenuItem(
+                value: name,
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        name,
+                        style: TextStyle(
+                          color: name == model
+                              ? CursorColors.fgBright
+                              : CursorColors.fg,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ),
+                    if (name == model)
+                      Icon(Icons.check, size: 14, color: CursorColors.accent),
+                  ],
+                ),
+              ),
+            );
+          }
+        }
+
+        final missing = catalog.where((m) => !installed.contains(m)).toList();
+        if (missing.isNotEmpty && onPull != null) {
+          items
+            ..add(const PopupMenuDivider())
+            ..add(
+              PopupMenuItem(
+                enabled: false,
+                height: 28,
+                child: Text(
+                  'Download',
+                  style: TextStyle(color: CursorColors.fgDim, fontSize: 10),
+                ),
+              ),
+            );
+          for (final name in missing) {
+            final busy = pullingModel == name;
+            items.add(
+              PopupMenuItem(
+                value: 'pull:$name',
+                enabled: !busy && pullingModel == null,
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        name,
+                        style: TextStyle(
+                          color: CursorColors.fgMuted,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ),
+                    Text(
+                      busy ? '…' : 'Pull',
+                      style: TextStyle(
+                        color: CursorColors.accentSoft,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          }
+        }
+        return items;
+      },
+      child: asText
+          ? Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 5),
+              child: child,
+            )
+          : _Pill(child: child),
+    );
+  }
+}
+
+class _ModePill extends StatelessWidget {
+  const _ModePill({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+    required this.tooltip,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+  final String tooltip;
+
+  @override
+  Widget build(BuildContext context) {
+    final isSymbol = label == '∞';
+    return Tooltip(
+      message: tooltip,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(20),
+        child: _Pill(
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              SizedBox(
-                width: 14,
-                height: 14,
-                child: CircularProgressIndicator(
-                  strokeWidth: 1.8,
-                  color: CursorColors.accentSoft,
+              Text(
+                label,
+                style: TextStyle(
+                  color: selected ? CursorColors.fgBright : CursorColors.fgMuted,
+                  fontSize: isSymbol ? 14 : 11,
+                  fontWeight: FontWeight.w500,
+                  height: isSymbol ? 1 : null,
                 ),
               ),
-              const SizedBox(width: 10),
-              Flexible(
-                child: Text(
-                  label,
-                  style: TextStyle(
-                    color: CursorColors.fgMuted,
-                    fontSize: 13,
-                    fontStyle: FontStyle.italic,
-                    height: 1.3,
-                  ),
-                ),
-              ),
+              Icon(Icons.expand_more, size: 14, color: CursorColors.fgDim),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _Pill extends StatelessWidget {
+  const _Pill({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+      decoration: BoxDecoration(
+        color: CursorColors.hover,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: CursorColors.border),
+      ),
+      child: child,
+    );
+  }
+}
+
+class _ActionIcon extends StatelessWidget {
+  const _ActionIcon({
+    required this.icon,
+    required this.tooltip,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(4),
+        child: Padding(
+          padding: const EdgeInsets.all(4),
+          child: Icon(icon, size: 14, color: CursorColors.fgDim),
         ),
       ),
     );

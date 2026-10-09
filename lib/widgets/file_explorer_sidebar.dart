@@ -81,55 +81,100 @@ class _FileExplorerSidebarState extends State<FileExplorerSidebar> {
       final isOpen = widget.openPath == entry.path;
       final isExpanded = _expanded.contains(entry.path);
 
-      widgets.add(
-        InkWell(
-          onTap: () {
-            if (entry.isDirectory) {
-              _toggleExpand(entry.path);
-            } else {
-              widget.onOpenFile(entry.path);
-            }
-          },
-          child: Container(
-            height: 22,
-            color: isOpen ? CursorColors.active : Colors.transparent,
-            padding: EdgeInsets.only(left: 8.0 + depth * 12.0, right: 8),
-            child: Row(
-              children: [
-                if (entry.isDirectory)
-                  Icon(
-                    isExpanded
-                        ? Icons.keyboard_arrow_down
-                        : Icons.keyboard_arrow_right,
-                    size: 14,
-                    color: CursorColors.fgMuted,
-                  )
-                else
-                  SizedBox(width: 14),
+      final row = InkWell(
+        onTap: () {
+          if (entry.isDirectory) {
+            _toggleExpand(entry.path);
+          } else {
+            widget.onOpenFile(entry.path);
+          }
+        },
+        child: Container(
+          height: 22,
+          color: isOpen ? CursorColors.active : Colors.transparent,
+          padding: EdgeInsets.only(left: 8.0 + depth * 12.0, right: 8),
+          child: Row(
+            children: [
+              if (entry.isDirectory)
                 Icon(
-                  entry.isDirectory
-                      ? Icons.folder
-                      : Icons.insert_drive_file_outlined,
+                  isExpanded
+                      ? Icons.keyboard_arrow_down
+                      : Icons.keyboard_arrow_right,
                   size: 14,
-                  color: entry.isDirectory
-                      ? const Color(0xFFC09553)
-                      : CursorColors.fgMuted,
+                  color: CursorColors.fgMuted,
+                )
+              else
+                SizedBox(width: 14),
+              Icon(
+                entry.isDirectory
+                    ? Icons.folder
+                    : Icons.insert_drive_file_outlined,
+                size: 14,
+                color: entry.isDirectory
+                    ? const Color(0xFFC09553)
+                    : CursorColors.fgMuted,
+              ),
+              SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  entry.name,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: isOpen ? Colors.white : CursorColors.fg,
+                    fontSize: 12,
+                  ),
                 ),
-                SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    entry.name,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: isOpen ? Colors.white : CursorColors.fg,
-                      fontSize: 12,
+              ),
+            ],
+          ),
+        ),
+      );
+
+      widgets.add(
+        entry.isDirectory
+            ? row
+            : Draggable<String>(
+                data: entry.path,
+                feedback: Material(
+                  color: Colors.transparent,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: CursorColors.panel,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: CursorColors.border),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Color(0x44000000),
+                          blurRadius: 8,
+                          offset: Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.insert_drive_file_outlined,
+                          size: 14,
+                          color: CursorColors.fgMuted,
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          entry.name,
+                          style: TextStyle(
+                            color: CursorColors.fgBright,
+                            fontSize: 12,
+                            decoration: TextDecoration.none,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
-              ],
-            ),
-          ),
-        ),
+                childWhenDragging: Opacity(opacity: 0.4, child: row),
+                child: row,
+              ),
       );
 
       if (entry.isDirectory && isExpanded) {

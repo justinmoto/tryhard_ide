@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
@@ -35,6 +36,17 @@ class OllamaService {
     this.embedModel = 'nomic-embed-text',
   });
 
+  /// Small / mid models that work well for local coding on laptops.
+  static const recommendedChatModels = <String>[
+    'qwen2.5-coder:1.5b',
+    'qwen2.5-coder:3b',
+    'qwen2.5:3b',
+    'llama3.2:3b',
+    'gemma2:2b',
+    'phi3:mini',
+    'deepseek-coder:1.3b',
+  ];
+
   final String baseUrl;
   String chatModel;
   final String embedModel;
@@ -42,6 +54,16 @@ class OllamaService {
   http.Client? _activeChatClient;
 
   Uri _uri(String path) => Uri.parse('$baseUrl$path');
+
+  /// Models ready to use, then recommended ones not yet installed.
+  static List<String> catalog(List<String> installed) {
+    final seen = <String>{};
+    final out = <String>[];
+    for (final m in [...installed, ...recommendedChatModels]) {
+      if (seen.add(m)) out.add(m);
+    }
+    return out;
+  }
 
   void cancelChat() {
     final client = _activeChatClient;
@@ -139,6 +161,63 @@ class OllamaService {
       return 'Model "$chatModel" not found. Pull it with: ollama pull $chatModel';
     }
     return 'Ollama $action failed: $detail';
+  }
+
+  /// Download a model via Ollama (`ollama pull`). [onProgress] gets a
+  /// human status and optional 0–1 fraction when known.
+  Future<void> pullModel(
+    String name, {
+    void Function(String status, double? progress)? onProgress,
+  }) async {
+    final client = http.Client();
+    try {
+      final request = http.Request('POST', _uri('/api/pull'))
+        ..headers['Content-Type'] = 'application/json'
+        ..body = jsonEncode({'name': name, 'stream': true});
+      final streamed = await client.send(request).timeout(
+            const Duration(hours: 2),
+          );
+      if (streamed.statusCode != 200) {
+        final body = await streamed.stream.bytesToString();
+        throw Exception(
+          'Pull failed (HTTP ${streamed.statusCode}): '
+          '${body.trim().isEmpty ? 'unknown error' : body.trim()}',
+        );
+      }
+
+      final buffer = StringBuffer();
+      await for (final chunk in streamed.stream.transform(utf8.decoder)) {
+        buffer.write(chunk);
+        var text = buffer.toString();
+        final lines = text.split('\n');
+        buffer
+          ..clear()
+          ..write(lines.isEmpty ? '' : lines.last);
+        for (var i = 0; i < lines.length - 1; i++) {
+          final line = lines[i].trim();
+          if (line.isEmpty) continue;
+          Map<String, dynamic> data;
+          try {
+            data = jsonDecode(line) as Map<String, dynamic>;
+          } catch (_) {
+            continue;
+          }
+          if (data['error'] != null) {
+            throw Exception('${data['error']}');
+          }
+          final status = '${data['status'] ?? 'downloading'}';
+          double? progress;
+          final completed = data['completed'];
+          final total = data['total'];
+          if (completed is num && total is num && total > 0) {
+            progress = (completed / total).clamp(0.0, 1.0);
+          }
+          onProgress?.call(status, progress);
+        }
+      }
+    } finally {
+      client.close();
+    }
   }
 
   Future<List<double>> embed(String text) async {

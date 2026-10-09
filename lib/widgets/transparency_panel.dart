@@ -71,7 +71,18 @@ class TransparencyPanel extends StatelessWidget {
               for (final name in models)
                 PopupMenuItem(
                   value: name,
-                  child: Text(name, style: TextStyle(fontSize: 12, color: c.fg)),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          name,
+                          style: TextStyle(fontSize: 12, color: c.fg),
+                        ),
+                      ),
+                      if (name == model)
+                        Icon(Icons.check, size: 14, color: c.accent),
+                    ],
+                  ),
                 ),
             ],
             child: Row(

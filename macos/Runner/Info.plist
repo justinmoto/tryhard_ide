@@ -28,5 +28,9 @@
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Try Hard IDE uses the microphone for voice prompts in chat.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Try Hard IDE converts your voice into chat prompts.</string>
 </dict>
 </plist>
