@@ -457,8 +457,41 @@ class _IdeShellState extends State<IdeShell> {
     return result;
   }
 
-  void _dismissEditorDiff() {
-    setState(() => _showEditorDiff = false);
+  void _keepEditorDiff() {
+    setState(() {
+      _showEditorDiff = false;
+      // Keep result so DIFF tab can reopen until next edit.
+    });
+    _snack('Changes kept');
+  }
+
+  Future<void> _discardEditorDiff() async {
+    final diff = _editorDiff;
+    if (diff == null || !diff.ok || diff.path == null) {
+      setState(() {
+        _showEditorDiff = false;
+        _editorDiff = null;
+      });
+      return;
+    }
+    final path = diff.path!;
+    final previous = diff.oldContent ?? '';
+    try {
+      await File(path).writeAsString(previous, flush: true);
+    } catch (e) {
+      _snack('Discard failed: $e');
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      if (_openPath != null && p.equals(_openPath!, path)) {
+        _setEditorContent(previous, path: path, markSaved: true);
+      }
+      _showEditorDiff = false;
+      _editorDiff = null;
+      _selection = '';
+    });
+    _snack('Discarded — reverted ${p.basename(path)}');
   }
 
   void _onActivity(ActivityItem item) {
@@ -514,8 +547,8 @@ class _IdeShellState extends State<IdeShell> {
         path: diff.path!,
         oldContent: diff.oldContent ?? '',
         newContent: diff.newContent ?? _editor.text,
-        onDone: _dismissEditorDiff,
-        onEditFile: _dismissEditorDiff,
+        onKeep: _keepEditorDiff,
+        onDiscard: _discardEditorDiff,
       );
     }
 
@@ -603,6 +636,36 @@ class _IdeShellState extends State<IdeShell> {
       onClose: () => setState(() => _chatOpen = false),
       applyEdit: _applyEdit,
       onOpenFile: (path) => _openFile(path),
+      onDiscardEdit: (result) async {
+        if (_editorDiff?.path == result.path) {
+          await _discardEditorDiff();
+        } else {
+          // Discard a chat result that may not be the active editor diff.
+          final path = result.path;
+          if (path == null) return;
+          try {
+            await File(path).writeAsString(result.oldContent ?? '', flush: true);
+            if (!mounted) return;
+            if (_openPath != null && p.equals(_openPath!, path)) {
+              setState(() {
+                _setEditorContent(result.oldContent ?? '', path: path, markSaved: true);
+                _showEditorDiff = false;
+                _editorDiff = null;
+              });
+            }
+            _snack('Discarded — reverted ${p.basename(path)}');
+          } catch (e) {
+            _snack('Discard failed: $e');
+          }
+        }
+      },
+      onKeepEdit: (result) {
+        if (_editorDiff?.path == result.path) {
+          _keepEditorDiff();
+        } else {
+          _snack('Changes kept for ${p.basename(result.path ?? 'file')}');
+        }
+      },
     );
 
     final workbench = wide

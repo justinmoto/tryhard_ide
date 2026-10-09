@@ -10,15 +10,15 @@ class EditorDiffView extends StatelessWidget {
     required this.path,
     required this.oldContent,
     required this.newContent,
-    required this.onDone,
-    this.onEditFile,
+    required this.onKeep,
+    required this.onDiscard,
   });
 
   final String path;
   final String oldContent;
   final String newContent;
-  final VoidCallback onDone;
-  final VoidCallback? onEditFile;
+  final VoidCallback onKeep;
+  final VoidCallback onDiscard;
 
   @override
   Widget build(BuildContext context) {
@@ -72,19 +72,22 @@ class EditorDiffView extends StatelessWidget {
                   fontWeight: FontWeight.w700,
                 ),
               ),
-              const SizedBox(width: 12),
-              if (onEditFile != null)
-                TextButton(
-                  onPressed: onEditFile,
-                  child: Text(
-                    'Edit file',
-                    style: TextStyle(color: CursorColors.fgMuted, fontSize: 12),
+              const SizedBox(width: 8),
+              TextButton(
+                onPressed: onDiscard,
+                child: const Text(
+                  'Discard',
+                  style: TextStyle(
+                    color: Color(0xFFFF8E8E),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
                   ),
                 ),
+              ),
               TextButton(
-                onPressed: onDone,
+                onPressed: onKeep,
                 child: const Text(
-                  'Done',
+                  'Keep',
                   style: TextStyle(
                     color: Color(0xFF7DFFB3),
                     fontSize: 12,

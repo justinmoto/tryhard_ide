@@ -10,10 +10,14 @@ class DiffResultCard extends StatelessWidget {
     super.key,
     required this.result,
     this.onOpen,
+    this.onDiscard,
+    this.onKeep,
   });
 
   final ApplyEditResult result;
   final ValueChanged<String>? onOpen;
+  final VoidCallback? onDiscard;
+  final VoidCallback? onKeep;
 
   @override
   Widget build(BuildContext context) {
@@ -118,6 +122,38 @@ class DiffResultCard extends StatelessWidget {
               ],
             ),
           ),
+          if (onDiscard != null || onKeep != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(10, 0, 10, 8),
+              child: Row(
+                children: [
+                  if (onDiscard != null)
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: onDiscard,
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: const Color(0xFFFF8E8E),
+                          side: const BorderSide(color: Color(0xFFFF8E8E)),
+                          visualDensity: VisualDensity.compact,
+                        ),
+                        child: const Text('Discard', style: TextStyle(fontSize: 12)),
+                      ),
+                    ),
+                  if (onDiscard != null && onKeep != null) const SizedBox(width: 8),
+                  if (onKeep != null)
+                    Expanded(
+                      child: FilledButton(
+                        onPressed: onKeep,
+                        style: FilledButton.styleFrom(
+                          backgroundColor: const Color(0xFF3D9A5F),
+                          visualDensity: VisualDensity.compact,
+                        ),
+                        child: const Text('Keep', style: TextStyle(fontSize: 12)),
+                      ),
+                    ),
+                ],
+              ),
+            ),
           Divider(height: 1, color: CursorColors.border),
           ConstrainedBox(
             constraints: const BoxConstraints(maxHeight: 220),

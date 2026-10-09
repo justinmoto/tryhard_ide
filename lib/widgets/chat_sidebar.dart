@@ -25,6 +25,8 @@ class ChatSidebar extends StatefulWidget {
     required this.onClose,
     required this.applyEdit,
     required this.onOpenFile,
+    this.onDiscardEdit,
+    this.onKeepEdit,
   });
 
   final OllamaService ollama;
@@ -36,6 +38,8 @@ class ChatSidebar extends StatefulWidget {
   final VoidCallback onClose;
   final ApplyEditCallback applyEdit;
   final ValueChanged<String> onOpenFile;
+  final Future<void> Function(ApplyEditResult result)? onDiscardEdit;
+  final void Function(ApplyEditResult result)? onKeepEdit;
 
   @override
   State<ChatSidebar> createState() => _ChatSidebarState();
@@ -361,9 +365,16 @@ Rules:
               itemBuilder: (context, index) {
                 final entry = _entries[index];
                 if (entry.result != null) {
+                  final r = entry.result!;
                   return DiffResultCard(
-                    result: entry.result!,
+                    result: r,
                     onOpen: widget.onOpenFile,
+                    onDiscard: r.ok && widget.onDiscardEdit != null
+                        ? () => widget.onDiscardEdit!(r)
+                        : null,
+                    onKeep: r.ok && widget.onKeepEdit != null
+                        ? () => widget.onKeepEdit!(r)
+                        : null,
                   );
                 }
                 final msg = entry.message!;
