@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../services/ollama_service.dart';
+import '../theme/cursor_theme.dart';
 
 class ChatSidebar extends StatefulWidget {
   const ChatSidebar({
@@ -9,12 +10,14 @@ class ChatSidebar extends StatefulWidget {
     required this.openFileName,
     required this.selection,
     required this.fileContent,
+    required this.onClose,
   });
 
   final OllamaService ollama;
   final String? openFileName;
   final String selection;
   final String fileContent;
+  final VoidCallback onClose;
 
   @override
   State<ChatSidebar> createState() => _ChatSidebarState();
@@ -77,7 +80,6 @@ class _ChatSidebarState extends State<ChatSidebar> {
         for (final m in _messages)
           if (m.role == 'user' || m.role == 'assistant') m,
       ];
-      // Replace last user message with contextual prompt for the model.
       if (history.isNotEmpty && history.last.role == 'user') {
         history[history.length - 1] = ChatMessage(role: 'user', content: prompt);
       }
@@ -106,61 +108,81 @@ class _ChatSidebarState extends State<ChatSidebar> {
   @override
   Widget build(BuildContext context) {
     return ColoredBox(
-      color: const Color(0xFF151821),
+      color: CursorColors.sidebar,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(14, 14, 14, 8),
-            child: Row(
-              children: [
-                const Icon(Icons.smart_toy_outlined, color: Color(0xFF8AB4FF), size: 18),
-                const SizedBox(width: 8),
-                const Text(
-                  'Local AI Chat',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const Spacer(),
-                if (widget.openFileName != null)
-                  Flexible(
+          SizedBox(
+            height: 35,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+              child: Row(
+                children: [
+                  Icon(Icons.flag_outlined, size: 14, color: CursorColors.fgMuted),
+                  SizedBox(width: 8),
+                  Expanded(
                     child: Text(
-                      widget.openFileName!,
+                      widget.openFileName ?? 'New Chat',
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.45),
-                        fontSize: 11,
+                        color: CursorColors.fg,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
                       ),
                     ),
                   ),
-              ],
+                  _HeaderIcon(Icons.add, 'New chat', () {
+                    setState(() {
+                      _messages
+                        ..clear()
+                        ..add(
+                          const ChatMessage(
+                            role: 'assistant',
+                            content: 'New chat. How can I help?',
+                          ),
+                        );
+                    });
+                  }),
+                  _HeaderIcon(Icons.history, 'History', () {}),
+                  _HeaderIcon(Icons.more_horiz, 'More', () {}),
+                  _HeaderIcon(Icons.view_sidebar_outlined, 'Close', widget.onClose),
+                ],
+              ),
             ),
           ),
+          Divider(height: 1, color: CursorColors.border),
           Expanded(
             child: ListView.builder(
               controller: _scroll,
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
               itemCount: _messages.length,
               itemBuilder: (context, index) {
                 final msg = _messages[index];
                 final isUser = msg.role == 'user';
                 return Align(
-                  alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+                  alignment:
+                      isUser ? Alignment.centerRight : Alignment.centerLeft,
                   child: Container(
-                    margin: const EdgeInsets.only(bottom: 8),
-                    padding: const EdgeInsets.all(10),
-                    constraints: const BoxConstraints(maxWidth: 320),
+                    margin: const EdgeInsets.only(bottom: 10),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 10,
+                    ),
+                    constraints: const BoxConstraints(maxWidth: 340),
                     decoration: BoxDecoration(
                       color: isUser
-                          ? const Color(0xFF2A3A5C)
-                          : const Color(0xFF1C2130),
-                      borderRadius: BorderRadius.circular(10),
+                          ? CursorColors.chatUser
+                          : CursorColors.hover,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: CursorColors.border),
                     ),
                     child: SelectableText(
                       msg.content,
-                      style: const TextStyle(color: Colors.white, fontSize: 13, height: 1.35),
+                      style: TextStyle(
+                        color: CursorColors.fg,
+                        fontSize: 13,
+                        height: 1.4,
+                      ),
                     ),
                   ),
                 );
@@ -168,47 +190,104 @@ class _ChatSidebarState extends State<ChatSidebar> {
             ),
           ),
           Padding(
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-            child: Row(
-              children: [
-                Expanded(
-                  child: TextField(
+            padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
+            child: Container(
+              decoration: BoxDecoration(
+                color: CursorColors.input,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: CursorColors.border),
+              ),
+              child: Column(
+                children: [
+                  TextField(
                     controller: _controller,
-                    minLines: 1,
-                    maxLines: 4,
-                    style: const TextStyle(color: Colors.white, fontSize: 13),
+                    minLines: 2,
+                    maxLines: 5,
+                    style: TextStyle(color: Colors.white, fontSize: 13),
                     decoration: InputDecoration(
-                      hintText: 'Ask about this file…',
-                      hintStyle: TextStyle(color: Colors.white.withValues(alpha: 0.35)),
-                      filled: true,
-                      fillColor: const Color(0xFF0F1218),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(10),
-                        borderSide: BorderSide.none,
-                      ),
-                      contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 10,
-                      ),
+                      hintText: 'Plan, search, build anything…',
+                      hintStyle: TextStyle(color: CursorColors.fgDim, fontSize: 13),
+                      border: InputBorder.none,
+                      contentPadding: EdgeInsets.fromLTRB(12, 10, 12, 4),
                     ),
                     onSubmitted: (_) => _send(),
                   ),
-                ),
-                const SizedBox(width: 8),
-                IconButton.filled(
-                  onPressed: _sending ? null : _send,
-                  icon: _sending
-                      ? const SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.send, size: 18),
-                ),
-              ],
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(6, 0, 6, 6),
+                    child: Row(
+                      children: [
+                        Icon(
+                          Icons.attach_file,
+                          size: 16,
+                          color: CursorColors.fgMuted,
+                        ),
+                        const Spacer(),
+                        Text(
+                          widget.ollama.chatModel,
+                          style: TextStyle(
+                            color: CursorColors.fgDim,
+                            fontSize: 11,
+                          ),
+                        ),
+                        SizedBox(width: 8),
+                        InkWell(
+                          onTap: _sending ? null : _send,
+                          borderRadius: BorderRadius.circular(6),
+                          child: Container(
+                            width: 28,
+                            height: 28,
+                            decoration: BoxDecoration(
+                              color: _sending
+                                  ? CursorColors.hover
+                                  : CursorColors.accent,
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: _sending
+                                ? Padding(
+                                    padding: EdgeInsets.all(6),
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      color: Colors.white,
+                                    ),
+                                  )
+                                : Icon(
+                                    Icons.arrow_upward,
+                                    size: 16,
+                                    color: Colors.white,
+                                  ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _HeaderIcon extends StatelessWidget {
+  const _HeaderIcon(this.icon, this.tooltip, this.onTap);
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(4),
+        child: Padding(
+          padding: const EdgeInsets.all(5),
+          child: Icon(icon, size: 15, color: CursorColors.fgMuted),
+        ),
       ),
     );
   }

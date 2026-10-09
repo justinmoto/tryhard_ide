@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../services/ollama_service.dart';
+import '../theme/cursor_theme.dart';
 
 class TransparencyPanel extends StatelessWidget {
   const TransparencyPanel({
@@ -9,74 +10,83 @@ class TransparencyPanel extends StatelessWidget {
     required this.model,
     required this.onModelChanged,
     required this.onRefresh,
+    this.fileName,
   });
 
   final OllamaStatus? status;
   final String model;
   final ValueChanged<String> onModelChanged;
   final VoidCallback onRefresh;
+  final String? fileName;
 
   @override
   Widget build(BuildContext context) {
+    final c = IdeColors.of(context);
     final online = status?.online == true;
     final models = status?.models ?? const <String>[];
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: const Color(0xFF12141A),
-        border: Border(top: BorderSide(color: Colors.white.withValues(alpha: 0.08))),
-      ),
+      height: 22,
+      color: c.accent,
+      padding: const EdgeInsets.symmetric(horizontal: 10),
       child: Row(
         children: [
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            decoration: BoxDecoration(
-              color: online
-                  ? const Color(0xFF163528)
-                  : const Color(0xFF3A1F1F),
-              borderRadius: BorderRadius.circular(6),
-            ),
-            child: Text(
-              online ? '100% on-device' : 'Ollama offline',
-              style: TextStyle(
-                color: online ? const Color(0xFF7DFFB3) : const Color(0xFFFF8E8E),
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
+          Icon(
+            online ? Icons.cloud_done_outlined : Icons.cloud_off_outlined,
+            size: 12,
+            color: Colors.white,
           ),
-          const SizedBox(width: 12),
+          const SizedBox(width: 6),
           Text(
-            'Model',
-            style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 12),
+            online ? 'on-device' : 'ollama offline',
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 11,
+              fontWeight: FontWeight.w500,
+            ),
           ),
-          const SizedBox(width: 8),
-          DropdownButtonHideUnderline(
-            child: DropdownButton<String>(
-              value: models.contains(model) ? model : null,
-              hint: Text(
-                model,
-                style: const TextStyle(color: Colors.white70, fontSize: 12),
+          const SizedBox(width: 14),
+          if (fileName != null) ...[
+            const Icon(Icons.insert_drive_file_outlined, size: 11, color: Colors.white70),
+            const SizedBox(width: 4),
+            Flexible(
+              child: Text(
+                fileName!,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: Colors.white70, fontSize: 11),
               ),
-              dropdownColor: const Color(0xFF1C1F27),
-              style: const TextStyle(color: Colors.white, fontSize: 12),
-              items: [
-                for (final name in models)
-                  DropdownMenuItem(value: name, child: Text(name)),
+            ),
+            const SizedBox(width: 14),
+          ],
+          PopupMenuButton<String>(
+            tooltip: 'Model',
+            onSelected: onModelChanged,
+            color: c.panel,
+            itemBuilder: (context) => [
+              for (final name in models)
+                PopupMenuItem(
+                  value: name,
+                  child: Text(name, style: TextStyle(fontSize: 12, color: c.fg)),
+                ),
+            ],
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  model,
+                  style: const TextStyle(color: Colors.white, fontSize: 11),
+                ),
+                const Icon(Icons.arrow_drop_down, size: 14, color: Colors.white70),
               ],
-              onChanged: models.isEmpty
-                  ? null
-                  : (value) {
-                      if (value != null) onModelChanged(value);
-                    },
             ),
           ),
           const Spacer(),
-          IconButton(
-            tooltip: 'Refresh Ollama',
-            onPressed: onRefresh,
-            icon: const Icon(Icons.refresh, size: 18, color: Colors.white70),
+          InkWell(
+            onTap: onRefresh,
+            child: const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 4),
+              child: Icon(Icons.refresh, size: 13, color: Colors.white70),
+            ),
           ),
         ],
       ),

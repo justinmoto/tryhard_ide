@@ -1,12 +1,21 @@
 import 'dart:io';
 
+import 'package:code_text_field/code_text_field.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 
+import '../editor/syntax.dart';
+import '../services/folder_picker.dart';
 import '../services/ollama_service.dart';
+import '../theme/cursor_theme.dart';
+import '../theme/theme_controller.dart';
+import '../widgets/activity_bar.dart';
 import '../widgets/chat_sidebar.dart';
+import '../widgets/file_explorer_sidebar.dart';
+import '../widgets/search_sidebar.dart';
+import '../widgets/top_toast.dart';
 import '../widgets/transparency_panel.dart';
 
 class IdeShell extends StatefulWidget {
@@ -18,23 +27,32 @@ class IdeShell extends StatefulWidget {
 
 class _IdeShellState extends State<IdeShell> {
   final _ollama = OllamaService();
-  final _editor = TextEditingController(
-    text: '''// Welcome to TryHard IDE (LocalForge)
-// Local AI via Ollama — works with Wi‑Fi off.
-
-function greet(name) {
-  return "Hello, " + name;
-}
-
-console.log(greet("offline world"));
-''',
-  );
+  late final CodeController _editor = CodeController();
   final _pathController = TextEditingController();
+  final _editorFocus = FocusNode();
+
+  static const _imageExts = {
+    '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico',
+  };
+  static const _binaryExts = {
+    '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico',
+    '.pdf', '.zip', '.jar', '.war', '.class', '.exe', '.dll', '.so',
+    '.dylib', '.o', '.a', '.wasm', '.mp3', '.mp4', '.mov', '.wav',
+    '.ttf', '.otf', '.woff', '.woff2', '.eot', '.7z', '.rar', '.gz',
+    '.tar', '.apk', '.ipa', '.dmg', '.app', '.bin', '.dat', '.db',
+    '.sqlite', '.pyc', '.pyo', '.parcel', '.snap',
+  };
 
   OllamaStatus? _status;
   String? _openPath;
+  String? _rootPath;
+  String _savedContent = '';
   String _selection = '';
+  bool _sidebarOpen = true;
   bool _chatOpen = true;
+  bool _isImagePreview = false;
+  bool _dirty = false;
+  ActivityItem _activity = ActivityItem.explorer;
 
   @override
   void initState() {
@@ -48,8 +66,14 @@ console.log(greet("offline world"));
     final next = (!sel.isValid || sel.isCollapsed)
         ? ''
         : sel.textInside(_editor.text);
-    if (next != _selection) {
-      setState(() => _selection = next);
+    final dirty = _openPath != null &&
+        !_isImagePreview &&
+        _editor.text != _savedContent;
+    if (next != _selection || dirty != _dirty) {
+      setState(() {
+        _selection = next;
+        _dirty = dirty;
+      });
     }
   }
 
@@ -57,8 +81,18 @@ console.log(greet("offline world"));
   void dispose() {
     _editor.removeListener(_onEditorChanged);
     _editor.dispose();
+    _editorFocus.dispose();
     _pathController.dispose();
     super.dispose();
+  }
+
+  void _setEditorContent(String content, {String? path, bool markSaved = true}) {
+    _editor.language = languageForPath(path);
+    _editor.text = content;
+    if (markSaved) {
+      _savedContent = content;
+      _dirty = false;
+    }
   }
 
   Future<void> _refreshOllama() async {
@@ -75,8 +109,19 @@ console.log(greet("offline world"));
     }
   }
 
-  Future<void> _openFile() async {
-    final raw = _pathController.text.trim();
+  bool _looksBinary(List<int> bytes) {
+    final sample = bytes.length > 8000 ? bytes.sublist(0, 8000) : bytes;
+    if (sample.contains(0)) return true;
+    var weird = 0;
+    for (final b in sample) {
+      if (b == 9 || b == 10 || b == 13) continue;
+      if (b < 32 || b == 0x7F) weird++;
+    }
+    return weird > sample.length * 0.05;
+  }
+
+  Future<void> _openFile([String? pathOverride]) async {
+    final raw = (pathOverride ?? _pathController.text).trim();
     if (raw.isEmpty) return;
     if (kIsWeb) {
       _snack('File open is desktop/mobile only.');
@@ -88,187 +133,633 @@ console.log(greet("offline world"));
         _snack('File not found: $raw');
         return;
       }
+
+      final ext = p.extension(raw).toLowerCase();
+      if (_imageExts.contains(ext)) {
+        setState(() {
+          _openPath = raw;
+          _pathController.text = raw;
+          _setEditorContent('', path: null);
+          _selection = '';
+          _isImagePreview = true;
+          _dirty = false;
+          _rootPath ??= p.dirname(raw);
+        });
+        return;
+      }
+
+      if (_binaryExts.contains(ext)) {
+        _snack('Cannot open binary file: ${p.basename(raw)}');
+        return;
+      }
+
+      final bytes = await file.readAsBytes();
+      if (_looksBinary(bytes)) {
+        _snack('Cannot open binary file: ${p.basename(raw)}');
+        return;
+      }
+
       final content = await file.readAsString();
       setState(() {
         _openPath = raw;
-        _editor.text = content;
+        _pathController.text = raw;
+        _setEditorContent(content, path: raw);
         _selection = '';
+        _isImagePreview = false;
+        _rootPath ??= p.dirname(raw);
       });
     } catch (e) {
-      _snack('Open failed: $e');
+      final name = p.basename(raw);
+      if ('$e'.contains('utf-8') || '$e'.contains('UTF-8')) {
+        _snack('Cannot open binary file: $name');
+      } else {
+        _snack('Open failed: $e');
+      }
+    }
+  }
+
+  Future<void> _pickFolder() async {
+    if (kIsWeb) {
+      _snack('Folders are desktop/mobile only.');
+      return;
+    }
+    final path = await FolderPicker.pick(initialDirectory: _rootPath);
+    if (path == null) return;
+    await _openFolder(path);
+  }
+
+  Future<void> _openFolder(String path) async {
+    if (kIsWeb) {
+      _snack('Folders are desktop/mobile only.');
+      return;
+    }
+    try {
+      final dir = Directory(path);
+      if (!await dir.exists()) {
+        _snack('Folder not found: $path');
+        return;
+      }
+      // Touch-list to verify sandbox access after picker grant.
+      dir.listSync(followLinks: false);
+      setState(() {
+        _rootPath = dir.path;
+        _sidebarOpen = true;
+        _activity = ActivityItem.explorer;
+      });
+    } catch (e) {
+      _snack('Open folder failed: $e');
     }
   }
 
   Future<void> _save() async {
     if (_openPath == null || kIsWeb) {
-      _snack('Open a file path first to save.');
+      _snack('Open a file first to save.');
       return;
     }
+    if (_isImagePreview) {
+      _snack('Image files are preview-only.');
+      return;
+    }
+    final path = _openPath!;
+    final content = _editor.text;
     try {
-      await File(_openPath!).writeAsString(_editor.text);
-      _snack('Saved ${_fileName()}');
+      final file = File(path);
+      await file.writeAsString(content, flush: true);
+      if (!mounted) return;
+      setState(() {
+        _savedContent = content;
+        _dirty = false;
+      });
+      _snack('Saved ${p.basename(path)}');
+    } on FileSystemException catch (e) {
+      final denied = '${e.osError}'.contains('Operation not permitted') ||
+          '${e.osError}'.contains('Permission denied') ||
+          e.message.contains('Cannot open file');
+      _snack(
+        denied
+            ? 'Save blocked by macOS. Re-open the folder, then try again.'
+            : 'Save failed: ${e.message}',
+      );
     } catch (e) {
       _snack('Save failed: $e');
     }
   }
 
+  void _closeFile() {
+    setState(() {
+      _openPath = null;
+      _pathController.clear();
+      _selection = '';
+      _setEditorContent('', path: null);
+      _isImagePreview = false;
+      _dirty = false;
+    });
+  }
+
   String? _fileName() => _openPath == null ? null : p.basename(_openPath!);
 
   void _snack(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+    showTopToast(context, message);
+  }
+
+  void _onActivity(ActivityItem item) {
+    setState(() {
+      if (_activity == item && _sidebarOpen) {
+        _sidebarOpen = false;
+      } else {
+        _activity = item;
+        _sidebarOpen = true;
+      }
+    });
   }
 
   @override
   Widget build(BuildContext context) {
+    CursorColors.bindFrom(context);
     final wide = MediaQuery.sizeOf(context).width >= 900;
 
     final editorPane = Column(
       children: [
-        _toolbar(),
+        _tabBar(),
         Expanded(
           child: ColoredBox(
-            color: const Color(0xFF0B0D12),
-            child: TextField(
-              controller: _editor,
-              maxLines: null,
-              expands: true,
-              style: const TextStyle(
-                fontFamily: 'Menlo',
-                fontSize: 13,
-                color: Color(0xFFE8ECF5),
-                height: 1.45,
-              ),
-              cursorColor: const Color(0xFF8AB4FF),
-              decoration: const InputDecoration(
-                border: InputBorder.none,
-                contentPadding: EdgeInsets.all(16),
-              ),
-            ),
+            color: CursorColors.editor,
+            child: _openPath == null
+                ? Center(
+                    child: Text(
+                      'Try Hard IDE',
+                      style: TextStyle(
+                        color: CursorColors.fgDim,
+                        fontSize: 28,
+                        fontWeight: FontWeight.w300,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                  )
+                : _isImagePreview
+                    ? Center(
+                        child: Padding(
+                          padding: const EdgeInsets.all(24),
+                          child: Image.file(
+                            File(_openPath!),
+                            fit: BoxFit.contain,
+                            errorBuilder: (context, error, stack) => Text(
+                              'Could not preview image',
+                              style: TextStyle(color: CursorColors.fgMuted),
+                            ),
+                          ),
+                        ),
+                      )
+                    : CodeTheme(
+                        data: CodeThemeData(
+                          styles: syntaxTheme(dark: CursorColors.isDark),
+                        ),
+                        child: CodeField(
+                          controller: _editor,
+                          focusNode: _editorFocus,
+                          expands: true,
+                          wrap: false,
+                          background: CursorColors.editor,
+                          cursorColor: CursorColors.accentSoft,
+                          textStyle: TextStyle(
+                            fontFamily: 'Menlo',
+                            fontSize: 13,
+                            color: CursorColors.fgBright,
+                            height: 1.45,
+                          ),
+                          lineNumberStyle: LineNumberStyle(
+                            width: 48,
+                            textStyle: TextStyle(
+                              color: CursorColors.fgDim,
+                              fontSize: 12,
+                              fontFamily: 'Menlo',
+                            ),
+                            background: CursorColors.editor,
+                          ),
+                          padding: const EdgeInsets.only(top: 8, bottom: 8),
+                        ),
+                      ),
           ),
-        ),
-        TransparencyPanel(
-          status: _status,
-          model: _ollama.chatModel,
-          onModelChanged: (m) => setState(() => _ollama.chatModel = m),
-          onRefresh: _refreshOllama,
         ),
       ],
     );
+
+    final Widget sidebar;
+    switch (_activity) {
+      case ActivityItem.search:
+        sidebar = SearchSidebar(
+          rootPath: _rootPath,
+          onOpenFile: (path) => _openFile(path),
+        );
+      case ActivityItem.git:
+        sidebar = const _PlaceholderSidebar(
+          title: 'SOURCE CONTROL',
+          message: 'Source control coming soon.',
+        );
+      case ActivityItem.extensions:
+        sidebar = const _PlaceholderSidebar(
+          title: 'EXTENSIONS',
+          message: 'Extensions coming soon.',
+        );
+      case ActivityItem.explorer:
+        sidebar = FileExplorerSidebar(
+          rootPath: _rootPath,
+          openPath: _openPath,
+          onOpenFile: (path) => _openFile(path),
+          onPickFolder: _pickFolder,
+        );
+    }
 
     final chat = ChatSidebar(
       ollama: _ollama,
       openFileName: _fileName(),
       selection: _selection,
       fileContent: _editor.text,
+      onClose: () => setState(() => _chatOpen = false),
     );
 
-    return Scaffold(
-      backgroundColor: const Color(0xFF0B0D12),
-      body: wide
-          ? Row(
-              children: [
-                Expanded(flex: 3, child: editorPane),
-                if (_chatOpen)
-                  SizedBox(
-                    width: 360,
+    final workbench = wide
+        ? Row(
+            children: [
+              ActivityBar(
+                active: _activity,
+                explorerOpen: _sidebarOpen,
+                chatOpen: _chatOpen,
+                onSelect: _onActivity,
+                onToggleChat: () => setState(() => _chatOpen = !_chatOpen),
+              ),
+              if (_sidebarOpen)
+                SizedBox(
+                  width: 260,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      border: Border(
+                        right: BorderSide(color: CursorColors.border),
+                      ),
+                    ),
+                    child: sidebar,
+                  ),
+                ),
+              Expanded(child: editorPane),
+              if (_chatOpen)
+                SizedBox(
+                  width: 380,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      border: Border(
+                        left: BorderSide(color: CursorColors.border),
+                      ),
+                    ),
                     child: chat,
                   ),
-              ],
-            )
-          : Column(
-              children: [
-                Expanded(child: editorPane),
-                if (_chatOpen)
-                  SizedBox(
-                    height: MediaQuery.sizeOf(context).height * 0.42,
-                    child: chat,
-                  ),
-              ],
-            ),
+                ),
+            ],
+          )
+        : Column(
+            children: [
+              if (_sidebarOpen)
+                SizedBox(
+                  height: MediaQuery.sizeOf(context).height * 0.28,
+                  child: sidebar,
+                ),
+              Expanded(child: editorPane),
+              if (_chatOpen)
+                SizedBox(
+                  height: MediaQuery.sizeOf(context).height * 0.36,
+                  child: chat,
+                ),
+            ],
+          );
+
+    return CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.keyS, meta: true): _save,
+        const SingleActivator(LogicalKeyboardKey.keyS, control: true): _save,
+      },
+      child: Focus(
+        autofocus: true,
+        child: Scaffold(
+          backgroundColor: CursorColors.bg,
+          body: Column(
+            children: [
+              _titleBar(),
+              Expanded(child: workbench),
+              TransparencyPanel(
+                status: _status,
+                model: _ollama.chatModel,
+                fileName: _fileName(),
+                onModelChanged: (m) => setState(() => _ollama.chatModel = m),
+                onRefresh: _refreshOllama,
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
-  Widget _toolbar() {
+  Widget _titleBar() {
+    const trafficLightInset = 78.0;
     return Container(
-      height: 52,
-      padding: const EdgeInsets.symmetric(horizontal: 12),
-      decoration: BoxDecoration(
-        color: const Color(0xFF12141A),
-        border: Border(
-          bottom: BorderSide(color: Colors.white.withValues(alpha: 0.08)),
-        ),
-      ),
+      height: 38,
+      color: CursorColors.titleBar,
+      padding: const EdgeInsets.only(left: trafficLightInset, right: 8),
       child: Row(
         children: [
-          const Text(
-            'TryHard IDE',
-            style: TextStyle(
-              color: Colors.white,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 0.2,
-            ),
+          _TitleIcon(
+            icon: Icons.arrow_back_ios_new,
+            tooltip: 'Back',
+            onTap: () {},
+            size: 12,
           ),
-          const SizedBox(width: 8),
-          Text(
-            'LocalForge',
-            style: TextStyle(
-              color: Colors.white.withValues(alpha: 0.4),
-              fontSize: 12,
-            ),
+          _TitleIcon(
+            icon: Icons.arrow_forward_ios,
+            tooltip: 'Forward',
+            onTap: () {},
+            size: 12,
           ),
-          const SizedBox(width: 16),
           Expanded(
-            child: TextField(
-              controller: _pathController,
-              style: const TextStyle(color: Colors.white, fontSize: 12),
-              decoration: InputDecoration(
-                hintText: 'Absolute file path to open…',
-                hintStyle: TextStyle(color: Colors.white.withValues(alpha: 0.3)),
-                isDense: true,
-                filled: true,
-                fillColor: const Color(0xFF0B0D12),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8),
-                  borderSide: BorderSide.none,
-                ),
-                contentPadding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 8,
+            child: Center(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 360),
+                child: SizedBox(
+                  height: 26,
+                  child: TextField(
+                    controller: _pathController,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: CursorColors.fg, fontSize: 12),
+                    decoration: InputDecoration(
+                      hintText: _rootPath != null
+                          ? p.basename(_rootPath!)
+                          : 'tryhard_ide',
+                      hintStyle: TextStyle(
+                        color: CursorColors.fgDim,
+                        fontSize: 12,
+                      ),
+                      prefixIcon: Icon(
+                        Icons.search,
+                        size: 14,
+                        color: CursorColors.fgDim,
+                      ),
+                      prefixIconConstraints: const BoxConstraints(
+                        minWidth: 32,
+                        minHeight: 26,
+                      ),
+                      isDense: true,
+                      filled: true,
+                      fillColor: CursorColors.input,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(6),
+                        borderSide: BorderSide(color: CursorColors.border),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(6),
+                        borderSide: BorderSide(color: CursorColors.border),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(6),
+                        borderSide: BorderSide(color: CursorColors.accent),
+                      ),
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 4,
+                      ),
+                    ),
+                    onSubmitted: (_) => _openFile(),
+                  ),
                 ),
               ),
-              onSubmitted: (_) => _openFile(),
             ),
           ),
-          const SizedBox(width: 8),
-          IconButton(
-            tooltip: 'Open',
-            onPressed: _openFile,
-            icon: const Icon(Icons.folder_open, color: Colors.white70, size: 20),
+          _TitleIcon(
+            icon: Icons.folder_open,
+            tooltip: 'Open folder',
+            onTap: _pickFolder,
           ),
-          IconButton(
-            tooltip: 'Save',
-            onPressed: _save,
-            icon: const Icon(Icons.save_outlined, color: Colors.white70, size: 20),
+          _TitleIcon(
+            icon: Icons.save_outlined,
+            tooltip: _dirty ? 'Save (⌘S) — unsaved changes' : 'Save (⌘S)',
+            onTap: _save,
+            active: _dirty,
           ),
-          IconButton(
-            tooltip: _chatOpen ? 'Hide chat' : 'Show chat',
-            onPressed: () => setState(() => _chatOpen = !_chatOpen),
-            icon: Icon(
-              _chatOpen ? Icons.chat_bubble : Icons.chat_bubble_outline,
-              color: Colors.white70,
-              size: 20,
-            ),
-          ),
-          IconButton(
-            tooltip: 'Copy selection',
-            onPressed: () async {
+          _TitleIcon(
+            icon: Icons.copy_outlined,
+            tooltip: 'Copy',
+            onTap: () async {
               final text = _selection.isNotEmpty ? _selection : _editor.text;
               await Clipboard.setData(ClipboardData(text: text));
               _snack('Copied');
             },
-            icon: const Icon(Icons.copy, color: Colors.white70, size: 20),
+          ),
+          _TitleIcon(
+            icon: Icons.chat_bubble_outline,
+            tooltip: _chatOpen ? 'Hide chat' : 'Show chat',
+            onTap: () => setState(() => _chatOpen = !_chatOpen),
+            active: _chatOpen,
+          ),
+          Builder(
+            builder: (context) {
+              final theme = ThemeController.of(context);
+              return _TitleIcon(
+                icon: theme.isDark
+                    ? Icons.light_mode_outlined
+                    : Icons.dark_mode_outlined,
+                tooltip: theme.isDark ? 'Light theme' : 'Dark theme',
+                onTap: theme.toggle,
+              );
+            },
+          ),
+          SizedBox(width: 4),
+          Container(
+            height: 24,
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            decoration: BoxDecoration(
+              color: const Color(0xFF2B5278),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'Agents',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                SizedBox(width: 4),
+                Icon(Icons.open_in_new, size: 11, color: Colors.white70),
+              ],
+            ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _tabBar() {
+    final name = _fileName();
+    return Container(
+      height: 35,
+      color: CursorColors.tabInactive,
+      child: Row(
+        children: [
+          if (name != null)
+            Container(
+              constraints: const BoxConstraints(minWidth: 120, maxWidth: 240),
+              height: 35,
+              padding: const EdgeInsets.only(left: 12, right: 4),
+              decoration: BoxDecoration(
+                color: CursorColors.tabActive,
+                border: Border(
+                  top: BorderSide(color: CursorColors.accent, width: 1),
+                  right: BorderSide(color: CursorColors.border),
+                ),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.insert_drive_file_outlined,
+                    size: 13,
+                    color: CursorColors.fgMuted,
+                  ),
+                  SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      name,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: CursorColors.fgBright,
+                        fontSize: 12,
+                        fontStyle: _dirty ? FontStyle.italic : FontStyle.normal,
+                      ),
+                    ),
+                  ),
+                  Tooltip(
+                    message: _dirty ? 'Unsaved changes — Close' : 'Close',
+                    child: InkWell(
+                      onTap: _closeFile,
+                      borderRadius: BorderRadius.circular(4),
+                      child: Padding(
+                        padding: const EdgeInsets.all(4),
+                        child: _dirty
+                            ? Container(
+                                width: 8,
+                                height: 8,
+                                margin: const EdgeInsets.all(3),
+                                decoration: BoxDecoration(
+                                  color: CursorColors.fgBright,
+                                  shape: BoxShape.circle,
+                                ),
+                              )
+                            : Icon(
+                                Icons.close,
+                                size: 14,
+                                color: CursorColors.fgMuted,
+                              ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          const Spacer(),
+          if (_openPath != null)
+            Padding(
+              padding: const EdgeInsets.only(right: 10),
+              child: Text(
+                _openPath!,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: CursorColors.fgDim,
+                  fontSize: 11,
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _PlaceholderSidebar extends StatelessWidget {
+  const _PlaceholderSidebar({
+    required this.title,
+    required this.message,
+  });
+
+  final String title;
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return ColoredBox(
+      color: CursorColors.sidebar,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SizedBox(
+            height: 35,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  title,
+                  style: TextStyle(
+                    color: CursorColors.fg,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 0.8,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Text(
+              message,
+              style: TextStyle(color: CursorColors.fgMuted, fontSize: 12),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TitleIcon extends StatelessWidget {
+  const _TitleIcon({
+    required this.icon,
+    required this.tooltip,
+    required this.onTap,
+    this.size = 15,
+    this.active = false,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback onTap;
+  final double size;
+  final bool active;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(4),
+        child: Padding(
+          padding: const EdgeInsets.all(6),
+          child: Icon(
+            icon,
+            size: size,
+            color: active ? CursorColors.fgBright : CursorColors.fgMuted,
+          ),
+        ),
       ),
     );
   }
