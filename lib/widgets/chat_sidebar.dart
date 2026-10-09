@@ -1238,12 +1238,12 @@ Repository questions:
             child: Row(
               children: [
                 _ModePill(
-                  label: '∞',
+                  icon: _useRepo ? Icons.hub : Icons.hub_outlined,
                   selected: _useRepo,
                   onTap: () => setState(() => _useRepo = !_useRepo),
                   tooltip: _useRepo
-                      ? 'Agent: retrieve repo context and apply edits'
-                      : 'Ask: answer without repo retrieval',
+                      ? 'Repo context on — retrieve and apply edits'
+                      : 'Repo context off',
                 ),
                 const SizedBox(width: 4),
                 Flexible(
@@ -1746,40 +1746,29 @@ class _ModelPicker extends StatelessWidget {
 
 class _ModePill extends StatelessWidget {
   const _ModePill({
-    required this.label,
+    required this.icon,
     required this.selected,
     required this.onTap,
     required this.tooltip,
   });
 
-  final String label;
+  final IconData icon;
   final bool selected;
   final VoidCallback onTap;
   final String tooltip;
 
   @override
   Widget build(BuildContext context) {
-    final isSymbol = label == '∞';
     return Tooltip(
       message: tooltip,
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(20),
         child: _Pill(
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                label,
-                style: TextStyle(
-                  color: selected ? CursorColors.fgBright : CursorColors.fgMuted,
-                  fontSize: isSymbol ? 14 : 11,
-                  fontWeight: FontWeight.w500,
-                  height: isSymbol ? 1 : null,
-                ),
-              ),
-              Icon(Icons.expand_more, size: 14, color: CursorColors.fgDim),
-            ],
+          child: Icon(
+            icon,
+            size: 15,
+            color: selected ? CursorColors.fgBright : CursorColors.fgMuted,
           ),
         ),
       ),
