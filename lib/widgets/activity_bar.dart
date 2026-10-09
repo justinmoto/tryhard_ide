@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import '../theme/cursor_theme.dart';
 import '../theme/theme_controller.dart';
 
-enum ActivityItem { explorer, search, git, extensions }
+enum ActivityItem { explorer, search }
 
 class ActivityBar extends StatelessWidget {
   const ActivityBar({
@@ -44,20 +44,6 @@ class ActivityBar extends StatelessWidget {
             tooltip: 'Search',
             selected: explorerOpen && active == ActivityItem.search,
             onTap: () => onSelect(ActivityItem.search),
-            colors: c,
-          ),
-          _Item(
-            icon: Icons.account_tree_outlined,
-            tooltip: 'Source Control',
-            selected: explorerOpen && active == ActivityItem.git,
-            onTap: () => onSelect(ActivityItem.git),
-            colors: c,
-          ),
-          _Item(
-            icon: Icons.extension_outlined,
-            tooltip: 'Extensions',
-            selected: explorerOpen && active == ActivityItem.extensions,
-            onTap: () => onSelect(ActivityItem.extensions),
             colors: c,
           ),
           const Spacer(),

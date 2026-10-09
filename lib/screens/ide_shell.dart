@@ -633,31 +633,18 @@ class _IdeShellState extends State<IdeShell> {
       ],
     );
 
-    final Widget sidebar;
-    switch (_activity) {
-      case ActivityItem.search:
-        sidebar = SearchSidebar(
+    final Widget sidebar = switch (_activity) {
+      ActivityItem.search => SearchSidebar(
           rootPath: _rootPath,
           onOpenFile: (path) => _openFile(path),
-        );
-      case ActivityItem.git:
-        sidebar = const _PlaceholderSidebar(
-          title: 'SOURCE CONTROL',
-          message: 'Source control coming soon.',
-        );
-      case ActivityItem.extensions:
-        sidebar = const _PlaceholderSidebar(
-          title: 'EXTENSIONS',
-          message: 'Extensions coming soon.',
-        );
-      case ActivityItem.explorer:
-        sidebar = FileExplorerSidebar(
+        ),
+      ActivityItem.explorer => FileExplorerSidebar(
           rootPath: _rootPath,
           openPath: _openPath,
           onOpenFile: (path) => _openFile(path),
           onPickFolder: _pickFolder,
-        );
-    }
+        ),
+    };
 
     final chat = ChatSidebar(
       ollama: _ollama,
@@ -751,14 +738,17 @@ class _IdeShellState extends State<IdeShell> {
         : Column(
             children: [
               if (_sidebarOpen)
-                SizedBox(
-                  height: MediaQuery.sizeOf(context).height * 0.28,
+                Flexible(
+                  flex: 28,
                   child: sidebar,
                 ),
-              Expanded(child: editorPane),
+              Flexible(
+                flex: 36,
+                child: editorPane,
+              ),
               if (_chatOpen)
-                SizedBox(
-                  height: MediaQuery.sizeOf(context).height * 0.36,
+                Flexible(
+                  flex: 36,
                   child: chat,
                 ),
             ],
@@ -1101,53 +1091,6 @@ class _VerticalResizeHandleState extends State<_VerticalResizeHandle> {
             ),
           ),
         ),
-      ),
-    );
-  }
-}
-
-class _PlaceholderSidebar extends StatelessWidget {
-  const _PlaceholderSidebar({
-    required this.title,
-    required this.message,
-  });
-
-  final String title;
-  final String message;
-
-  @override
-  Widget build(BuildContext context) {
-    return ColoredBox(
-      color: CursorColors.sidebar,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          SizedBox(
-            height: 35,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  title,
-                  style: TextStyle(
-                    color: CursorColors.fg,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: 0.8,
-                  ),
-                ),
-              ),
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.all(16),
-            child: Text(
-              message,
-              style: TextStyle(color: CursorColors.fgMuted, fontSize: 12),
-            ),
-          ),
-        ],
       ),
     );
   }

@@ -94,6 +94,7 @@ class _ChatSidebarState extends State<ChatSidebar> {
   ];
   final _history = <ChatMessage>[];
   bool _sending = false;
+  String _statusLabel = '';
   int _requestGen = 0;
   List<String> _projectFiles = const [];
 
@@ -259,7 +260,16 @@ Repository questions:
     _requestGen++;
     widget.ollama.cancelChat();
     widget.repoIndex.cancel();
-    setState(() => _sending = false);
+    setState(() {
+      _sending = false;
+      _statusLabel = '';
+    });
+  }
+
+  void _setStatus(String label) {
+    if (!mounted) return;
+    setState(() => _statusLabel = label);
+    _scrollToEnd();
   }
 
   /// Refresh the index (only changed files) and fetch chunks for [query].
@@ -374,10 +384,14 @@ Repository questions:
     final gen = ++_requestGen;
     setState(() {
       _sending = true;
+      _statusLabel = _useRepo && widget.rootPath != null
+          ? 'Searching project…'
+          : 'Thinking…';
       _entries.add(_ChatEntry.text(ChatMessage(role: 'user', content: userVisible)));
       _history.add(ChatMessage(role: 'user', content: userVisible));
       _controller.clear();
     });
+    _scrollToEnd();
     _remember(StoredChatMessage(role: 'user', content: userVisible));
 
     try {
@@ -399,6 +413,7 @@ Repository questions:
         ChatMessage(role: 'user', content: prompt),
       ];
 
+      _setStatus('Thinking…');
       final reply = await widget.ollama.chat(messages: messages);
       if (!mounted || gen != _requestGen) return;
 
@@ -432,7 +447,11 @@ Repository questions:
             citations: citations,
           ),
         );
+        if (proposal != null) {
+          _statusLabel = 'Applying edit…';
+        }
       });
+      _scrollToEnd();
       _remember(
         StoredChatMessage(
           role: 'assistant',
@@ -481,7 +500,10 @@ Repository questions:
       });
     } finally {
       if (mounted && gen == _requestGen) {
-        setState(() => _sending = false);
+        setState(() {
+          _sending = false;
+          _statusLabel = '';
+        });
       }
       await Future<void>.delayed(const Duration(milliseconds: 50));
       if (_scroll.hasClients) {
@@ -719,8 +741,11 @@ Repository questions:
             child: ListView.builder(
               controller: _scroll,
               padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
-              itemCount: _entries.length,
+              itemCount: _entries.length + (_sending ? 1 : 0),
               itemBuilder: (context, index) {
+                if (_sending && index == _entries.length) {
+                  return _ThinkingBubble(label: _statusLabel);
+                }
                 final entry = _entries[index];
                 if (entry.result != null) {
                   final r = entry.result!;
@@ -926,6 +951,77 @@ Repository questions:
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _ThinkingBubble extends StatefulWidget {
+  const _ThinkingBubble({required this.label});
+
+  final String label;
+
+  @override
+  State<_ThinkingBubble> createState() => _ThinkingBubbleState();
+}
+
+class _ThinkingBubbleState extends State<_ThinkingBubble>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _pulse = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 900),
+  )..repeat(reverse: true);
+
+  @override
+  void dispose() {
+    _pulse.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final label = widget.label.isEmpty ? 'Working…' : widget.label;
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: FadeTransition(
+        opacity: Tween<double>(begin: 0.55, end: 1).animate(
+          CurvedAnimation(parent: _pulse, curve: Curves.easeInOut),
+        ),
+        child: Container(
+          margin: const EdgeInsets.only(bottom: 10),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          constraints: const BoxConstraints(maxWidth: 340),
+          decoration: BoxDecoration(
+            color: CursorColors.hover,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: CursorColors.border),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(
+                  strokeWidth: 1.8,
+                  color: CursorColors.accentSoft,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Flexible(
+                child: Text(
+                  label,
+                  style: TextStyle(
+                    color: CursorColors.fgMuted,
+                    fontSize: 13,
+                    fontStyle: FontStyle.italic,
+                    height: 1.3,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
