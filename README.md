@@ -47,6 +47,13 @@ flutter run -d android
 
 ## MVP features
 
+### 0. Local Run (offline)
+Run project scripts on-device with a log panel — no internet required if deps are already installed.
+
+- [x] Detect `package.json` / `pubspec.yaml` / pytest targets
+- [x] Run / Stop + log panel (`⌘R` run, `⌘J` toggle panel)
+- [ ] Wire into Fix-Error Agent loop
+
 ### 1. Local AI Chat
 Sidebar chat that knows the open file, the selection, and the project. Runs on a local coding model (e.g. `qwen2.5-coder` 3B/7B) through Ollama.
 

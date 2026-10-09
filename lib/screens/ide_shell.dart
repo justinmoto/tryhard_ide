@@ -9,11 +9,13 @@ import 'package:path/path.dart' as p;
 import '../editor/syntax.dart';
 import '../services/folder_picker.dart';
 import '../services/ollama_service.dart';
+import '../services/run_service.dart';
 import '../theme/cursor_theme.dart';
 import '../theme/theme_controller.dart';
 import '../widgets/activity_bar.dart';
 import '../widgets/chat_sidebar.dart';
 import '../widgets/file_explorer_sidebar.dart';
+import '../widgets/run_panel.dart';
 import '../widgets/search_sidebar.dart';
 import '../widgets/top_toast.dart';
 import '../widgets/transparency_panel.dart';
@@ -27,6 +29,7 @@ class IdeShell extends StatefulWidget {
 
 class _IdeShellState extends State<IdeShell> {
   final _ollama = OllamaService();
+  final _runService = RunService();
   late final CodeController _editor = CodeController();
   final _pathController = TextEditingController();
   final _editorFocus = FocusNode();
@@ -50,6 +53,7 @@ class _IdeShellState extends State<IdeShell> {
   String _selection = '';
   bool _sidebarOpen = true;
   bool _chatOpen = true;
+  bool _runOpen = false;
   bool _isImagePreview = false;
   bool _dirty = false;
   ActivityItem _activity = ActivityItem.explorer;
@@ -83,7 +87,24 @@ class _IdeShellState extends State<IdeShell> {
     _editor.dispose();
     _editorFocus.dispose();
     _pathController.dispose();
+    _runService.dispose();
     super.dispose();
+  }
+
+  Future<void> _quickRun() async {
+    if (_rootPath == null) {
+      _snack('Open a folder first, then Run.');
+      setState(() => _runOpen = true);
+      return;
+    }
+    setState(() => _runOpen = true);
+    if (_runService.isRunning) {
+      await _runService.stop();
+      return;
+    }
+    final targets = await RunService.detectTargets(_rootPath);
+    if (!mounted || targets.isEmpty) return;
+    await _runService.start(workingDirectory: _rootPath!, target: targets.first);
   }
 
   void _setEditorContent(String content, {String? path, bool markSaved = true}) {
@@ -435,6 +456,14 @@ class _IdeShellState extends State<IdeShell> {
       bindings: {
         const SingleActivator(LogicalKeyboardKey.keyS, meta: true): _save,
         const SingleActivator(LogicalKeyboardKey.keyS, control: true): _save,
+        const SingleActivator(LogicalKeyboardKey.keyR, meta: true): _quickRun,
+        const SingleActivator(LogicalKeyboardKey.keyR, control: true): _quickRun,
+        const SingleActivator(LogicalKeyboardKey.keyJ, meta: true): () {
+          setState(() => _runOpen = !_runOpen);
+        },
+        const SingleActivator(LogicalKeyboardKey.keyJ, control: true): () {
+          setState(() => _runOpen = !_runOpen);
+        },
       },
       child: Focus(
         autofocus: true,
@@ -444,6 +473,22 @@ class _IdeShellState extends State<IdeShell> {
             children: [
               _titleBar(),
               Expanded(child: workbench),
+              if (_runOpen)
+                SizedBox(
+                  height: 220,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      border: Border(
+                        top: BorderSide(color: CursorColors.border),
+                      ),
+                    ),
+                    child: RunPanel(
+                      runService: _runService,
+                      rootPath: _rootPath,
+                      onClose: () => setState(() => _runOpen = false),
+                    ),
+                  ),
+                ),
               TransparencyPanel(
                 status: _status,
                 model: _ollama.chatModel,
@@ -542,6 +587,26 @@ class _IdeShellState extends State<IdeShell> {
             onTap: _save,
             active: _dirty,
           ),
+          ListenableBuilder(
+            listenable: _runService,
+            builder: (context, _) {
+              final running = _runService.isRunning;
+              return _TitleIcon(
+                icon: running ? Icons.stop_circle_outlined : Icons.play_arrow,
+                tooltip: running
+                    ? 'Stop process'
+                    : 'Run (⌘R) — open panel & start',
+                onTap: _quickRun,
+                active: running || _runOpen,
+              );
+            },
+          ),
+          _TitleIcon(
+            icon: Icons.terminal,
+            tooltip: _runOpen ? 'Hide run panel (⌘J)' : 'Show run panel (⌘J)',
+            onTap: () => setState(() => _runOpen = !_runOpen),
+            active: _runOpen,
+          ),
           _TitleIcon(
             icon: Icons.copy_outlined,
             tooltip: 'Copy',
@@ -568,30 +633,6 @@ class _IdeShellState extends State<IdeShell> {
                 onTap: theme.toggle,
               );
             },
-          ),
-          SizedBox(width: 4),
-          Container(
-            height: 24,
-            padding: const EdgeInsets.symmetric(horizontal: 10),
-            decoration: BoxDecoration(
-              color: const Color(0xFF2B5278),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  'Agents',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                SizedBox(width: 4),
-                Icon(Icons.open_in_new, size: 11, color: Colors.white70),
-              ],
-            ),
           ),
         ],
       ),
