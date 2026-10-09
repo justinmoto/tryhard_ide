@@ -83,6 +83,16 @@ class MigrationPlan {
   int count(MigrateAction a) => items.where((i) => i.action == a).length;
 }
 
+class BuildError {
+  const BuildError({required this.message, this.file});
+
+  /// Error text without stack frames.
+  final String message;
+
+  /// Absolute path of the project file to fix, when one could be found.
+  final String? file;
+}
+
 class MigrationResult {
   const MigrationResult({
     required this.outputDir,
@@ -932,6 +942,96 @@ createRoot(document.getElementById('root')$bang).render(
       _underRouterDir(r.file, 'app') != null;
 
   // ------------------------------------------------------------ verification
+
+  // ------------------------------------------------------------- build fixes
+
+  static final _ansi = RegExp(r'\x1B\[[0-9;]*[A-Za-z]');
+  static final _codeFile = RegExp(r'\.(?:[cm]?[jt]sx?)$');
+
+  /// The failing file and error text from `vite build` output, or null when
+  /// the output has no recognisable error.
+  static BuildError? parseBuildError(List<String> lines, String outputDir) {
+    final clean = [for (final l in lines) l.replaceAll(_ansi, '')];
+    var start = clean.lastIndexWhere((l) =>
+        l.contains('error during build') ||
+        l.contains('Build failed') ||
+        l.contains('[ERROR]') ||
+        RegExp(r'^\s*\[vite[:\]]').hasMatch(l));
+    if (start < 0) {
+      start = clean.lastIndexWhere((l) => RegExp(r'\berror\b', caseSensitive: false).hasMatch(l));
+    }
+    if (start < 0) return null;
+
+    // Stack frames are noise for the model and for path matching.
+    final message = clean
+        .skip(start)
+        .where((l) => !RegExp(r'^\s+at\s').hasMatch(l) && !l.startsWith('[exit'))
+        .take(25)
+        .join('\n')
+        .trim();
+
+    final patterns = [
+      RegExp(r'^\s*file:\s*(.+?)(?::\d+(?::\d+)?)?\s*$', multiLine: true),
+      RegExp(r'imported by "([^"]+)"'),
+      RegExp(r'''from ["']([^"']+)["']'''),
+      RegExp(r'^\s*(\S+?\.[cm]?[jt]sx?)\s*\(\d+:\d+\)', multiLine: true),
+      RegExp(r'''((?:[A-Za-z]:)?[\\/][^\s"':()]+\.[cm]?[jt]sx?)(?=[:\s"')]|$)''', multiLine: true),
+    ];
+    final root = p.normalize(p.absolute(outputDir));
+    for (final re in patterns) {
+      for (final m in re.allMatches(message)) {
+        final raw = m.group(1)!.trim();
+        final abs = p.normalize(p.isAbsolute(raw) ? raw : p.join(root, raw));
+        if (!p.isWithin(root, abs) || abs.contains('node_modules')) continue;
+        if (!_codeFile.hasMatch(abs) || !File(abs).existsSync()) continue;
+        return BuildError(message: message, file: abs);
+      }
+    }
+    return BuildError(message: message);
+  }
+
+  /// Asks the model to fix [error.file] for a failed build. Other project
+  /// files named in the error are sent as read-only context. Returns the
+  /// fixed file's path relative to [outputDir], or null if nothing changed.
+  Future<String?> fixBuildError(String outputDir, BuildError error, {String? model}) async {
+    final path = error.file;
+    if (path == null) return null;
+    final rel = p.relative(path, from: outputDir).replaceAll(r'\', '/');
+    final code = await File(path).readAsString();
+
+    final related = StringBuffer();
+    for (final m in RegExp(r'"([^"]+\.[cm]?[jt]sx?)"').allMatches(error.message)) {
+      final other = p.normalize(p.isAbsolute(m[1]!) ? m[1]! : p.join(outputDir, m[1]!));
+      if (p.equals(other, path) || !p.isWithin(outputDir, other) || other.contains('node_modules')) continue;
+      final f = File(other);
+      if (!await f.exists()) continue;
+      var text = await f.readAsString();
+      if (text.length > 4000) text = '${text.substring(0, 4000)}\n// …truncated';
+      related.write('\nRelated file (read-only): ${p.relative(other, from: outputDir).replaceAll(r'\', '/')}\n```\n$text\n```\n');
+    }
+
+    final reply = await ollama.chat(
+      messages: [
+        const ChatMessage(
+          role: 'system',
+          content: 'You fix build errors in a React + Vite + react-router-dom v6 project that was migrated from Next.js.\n'
+              '- Change only what the error requires; keep the rest of the file as is.\n'
+              '- No imports from "next" or "next/*".\n'
+              '- If an import names something the other file does not export, import what it does export instead.\n'
+              'Reply with ONLY the complete fixed file in one code block.',
+        ),
+        ChatMessage(
+          role: 'user',
+          content: 'Build error:\n```\n${error.message}\n```\n\nFile to fix: $rel\n```\n$code\n```\n$related',
+        ),
+      ],
+      model: model,
+    );
+    final fixed = CodeTranslator.extractCode(reply);
+    if (fixed.trim().isEmpty || fixed.trim() == code.trim()) return null;
+    await File(path).writeAsString(fixed, flush: true);
+    return rel;
+  }
 
   static Future<List<String>> leftoverNextImports(String outputDir) async {
     final out = <String>[];

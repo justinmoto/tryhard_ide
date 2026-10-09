@@ -102,6 +102,10 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
   bool _showMigrateFiles = false;
   bool? _buildOk;
   bool _buildWatching = false;
+  bool _buildFixing = false;
+  int _buildFixAttempts = 0;
+  final _buildFixed = <String>[];
+  String? _buildFixNote;
   DateTime _lastProgressPaint = DateTime(0);
   String _migrateSummary = '';
 
@@ -140,7 +144,7 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
   @override
   void dispose() {
     widget.runService.removeListener(_onRunChanged);
-    if (_busy || _migrating) widget.ollama.cancelChat();
+    if (_busy || _migrating || _buildFixing) widget.ollama.cancelChat();
     super.dispose();
   }
 
@@ -159,12 +163,87 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
   void _onRunChanged() {
     final rs = widget.runService;
     if (!_buildWatching || rs.activeTarget?.id != _buildTargetId) return;
-    if (!rs.isRunning && rs.exitCode != null) {
+    if (rs.isRunning || rs.exitCode == null) return;
+    // Clear first: the run service notifies again after exit.
+    _buildWatching = false;
+    if (rs.exitCode == 0) {
       setState(() {
-        _buildWatching = false;
-        _buildOk = rs.exitCode == 0;
+        _buildOk = true;
+        if (_buildFixed.isNotEmpty) {
+          _buildFixNote = 'Build fixed after $_buildFixAttempts auto-fix '
+              'attempt${_buildFixAttempts == 1 ? '' : 's'}.';
+        }
+      });
+    } else if (_autoFixEnabled && _buildFixAttempts < _maxAutoFix) {
+      _autoFixBuild(List.of(rs.lines));
+    } else {
+      setState(() {
+        _buildOk = false;
+        if (_buildFixAttempts > 0) {
+          _buildFixNote = 'Auto-fix tried $_buildFixAttempts time'
+              '${_buildFixAttempts == 1 ? '' : 's'}; the build still fails.';
+        }
       });
     }
+  }
+
+  /// Reads the failed build's output, has the model fix the file named in
+  /// the error, and rebuilds (without reinstalling).
+  Future<void> _autoFixBuild(List<String> lines) async {
+    final out = _migrated?.outputDir;
+    if (out == null) return;
+    final error = NextToReactMigration.parseBuildError(lines, out);
+    if (error?.file == null) {
+      setState(() {
+        _buildOk = false;
+        _buildFixNote = 'Auto-fix: could not find which file broke the build. See the Run panel.';
+      });
+      return;
+    }
+    final rel = p.relative(error!.file!, from: out).replaceAll(r'\', '/');
+    final attempt = ++_buildFixAttempts;
+    setState(() {
+      _buildFixing = true;
+      _buildFixNote = 'Auto-fix $attempt/$_maxAutoFix: fixing $rel…';
+    });
+    String? fixed;
+    try {
+      fixed = await _migration.fixBuildError(out, error, model: widget.model);
+    } on ChatCancelledException {
+      if (mounted) {
+        setState(() {
+          _buildFixing = false;
+          _buildOk = false;
+          _buildFixNote = 'Auto-fix cancelled.';
+        });
+      }
+      return;
+    } catch (e) {
+      fixed = null;
+    }
+    if (!mounted) return;
+    if (fixed == null) {
+      setState(() {
+        _buildFixing = false;
+        _buildOk = false;
+        _buildFixNote = 'Auto-fix: the model returned no changes for $rel.';
+      });
+      return;
+    }
+    setState(() {
+      _buildFixing = false;
+      _buildFixed.add(fixed!);
+      _buildWatching = true;
+      _buildFixNote = 'Auto-fix $attempt/$_maxAutoFix: fixed $fixed, rebuilding…';
+    });
+    widget.onRunCommand(
+      out,
+      RunTarget(
+        id: _buildTargetId,
+        label: 'vite build (auto-fix $attempt)',
+        command: 'npm run build',
+      ),
+    );
   }
 
   // ------------------------------------------------------------ translation
@@ -444,6 +523,9 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
     setState(() {
       _buildWatching = true;
       _buildOk = null;
+      _buildFixAttempts = 0;
+      _buildFixed.clear();
+      _buildFixNote = null;
     });
     widget.onRunCommand(
       out,
@@ -915,17 +997,33 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
                   : '${leftovers.length} file${leftovers.length == 1 ? '' : 's'} still import next/*',
               color: leftovers.isEmpty ? _green : _amber,
             ),
-            if (_buildOk != null || _buildWatching) ...[
+            if (_buildOk != null || _buildWatching || _buildFixing) ...[
               const SizedBox(height: 6),
-              _Badge(
-                icon: _buildWatching
-                    ? Icons.hourglass_top
-                    : (_buildOk! ? Icons.check_circle : Icons.error_outline),
-                label: _buildWatching
-                    ? 'vite build running…'
-                    : (_buildOk! ? 'vite build passed' : 'vite build failed (see Run panel)'),
-                color: _buildWatching ? CursorColors.fgMuted : (_buildOk! ? _green : _red),
-              ),
+              if (_buildFixing)
+                const _Badge(icon: Icons.build_outlined, label: 'Auto-fixing build…', color: _amber)
+              else if (_buildWatching)
+                _Badge(icon: Icons.hourglass_top, label: 'vite build running…', color: CursorColors.fgMuted)
+              else
+                _Badge(
+                  icon: _buildOk! ? Icons.check_circle : Icons.error_outline,
+                  label: _buildOk! ? 'vite build passed' : 'vite build failed',
+                  color: _buildOk! ? _green : _red,
+                ),
+              if (_buildFixNote != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(
+                    _buildFixNote!,
+                    style: TextStyle(color: CursorColors.fgMuted, fontSize: 11, height: 1.35),
+                  ),
+                ),
+              for (final rel in _buildFixed)
+                _fileLink(rel, p.joinAll([done.outputDir, ...rel.split('/')]), note: 'auto-fixed'),
+              if (_buildOk == false)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: _hint('Full error in the Run panel.'),
+                ),
             ],
             const SizedBox(height: 8),
             Text(
@@ -967,7 +1065,7 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
               if (!done.cancelled)
                 _TextAction(
                   label: 'Install & build',
-                  onTap: _buildWatching ? null : _installAndBuild,
+                  onTap: _buildWatching || _buildFixing ? null : _installAndBuild,
                 ),
               _TextAction(
                 label: 'Open as workspace',
@@ -1111,7 +1209,13 @@ class _Badge extends StatelessWidget {
         children: [
           Icon(icon, size: 13, color: color),
           const SizedBox(width: 5),
-          Text(label, style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.w600)),
+          Flexible(
+            child: Text(
+              label,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.w600),
+            ),
+          ),
         ],
       ),
     );

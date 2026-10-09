@@ -1,0 +1,22 @@
+[36mvite v5.4.21 [32mbuilding for production...[36m[39m
+transforming...
+[32m✓[39m 41 modules transformed.
+[31mx[39m Build failed in 634ms
+[31merror during build:
+[31msrc/app/page.tsx (1:9): "Missing" is not exported by "src/components/Header.tsx", imported by "src/app/page.tsx".[31m
+file: [36m{ROOT}/src/app/page.tsx:1:9[31m
+[33m
+1: import { Missing } from '@/components/Header';
+            ^
+2: export default function Home() { return <Missing />; }
+[31m
+    at getRollupError (file:///{ROOT}/node_modules/rollup/dist/es/shared/parseAst.js:319:41)
+    at error (file:///{ROOT}/node_modules/rollup/dist/es/shared/parseAst.js:315:42)
+    at Module.error (file:///{ROOT}/node_modules/rollup/dist/es/shared/node-entry.js:17860:16)
+    at Module.traceVariable (file:///{ROOT}/node_modules/rollup/dist/es/shared/node-entry.js:18294:29)
+    at ModuleScope.findVariable (file:///{ROOT}/node_modules/rollup/dist/es/shared/node-entry.js:15882:39)
+    at FunctionScope.findVariable (file:///{ROOT}/node_modules/rollup/dist/es/shared/node-entry.js:5966:38)
+    at FunctionBodyScope.findVariable (file:///{ROOT}/node_modules/rollup/dist/es/shared/node-entry.js:5966:38)
+    at Identifier.bind (file:///{ROOT}/node_modules/rollup/dist/es/shared/node-entry.js:5727:40)
+    at CallExpression.bind (file:///{ROOT}/node_modules/rollup/dist/es/shared/node-entry.js:3046:28)
+    at CallExpression.bind (file:///{ROOT}/node_modules/rollup/dist/es/shared/node-entry.js:12980:15)[39m
