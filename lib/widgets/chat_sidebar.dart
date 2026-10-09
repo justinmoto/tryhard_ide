@@ -1238,7 +1238,7 @@ Repository questions:
             child: Row(
               children: [
                 _ModePill(
-                  icon: _useRepo ? Icons.hub : Icons.hub_outlined,
+                  icon: Icons.code,
                   selected: _useRepo,
                   onTap: () => setState(() => _useRepo = !_useRepo),
                   tooltip: _useRepo
