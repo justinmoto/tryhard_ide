@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 
 import '../services/apply_edit_result.dart';
+import '../services/auto_fix.dart';
 import '../services/code_translator.dart';
 import '../services/equivalence_check.dart';
 import '../services/next_to_react.dart';
@@ -11,6 +12,8 @@ import '../services/ollama_service.dart';
 import '../services/run_service.dart';
 import '../services/ts_check.dart';
 import '../theme/cursor_theme.dart';
+
+typedef _Checks = ({EquivalenceReport? equiv, TscReport? tsc});
 
 /// Convert panel: single-file translation (JS ↔ Python, JS → TS) with a
 /// verification badge, and whole-project Next.js → React + Vite migration.
@@ -57,7 +60,17 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
   late final _equivalence = EquivalenceCheck(widget.ollama);
   late final _migration = NextToReactMigration(widget.ollama);
 
+  /// Project scans survive switching sidebar tabs (the widget is rebuilt).
+  static final _planCache = <String, MigrationPlan?>{};
+
+  /// Auto-fix preference; static so it survives switching sidebar tabs.
+  static bool _autoFixEnabled = true;
+
+  /// Each attempt is a full model call, so keep the loop short.
+  static const _maxAutoFix = 2;
+
   TranslationKind? _kind;
+  bool _targetExists = false;
   bool _busy = false;
   bool _cancelRequested = false;
   String? _status;
@@ -70,6 +83,11 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
   String? _targetPath;
   EquivalenceReport? _equiv;
   TscReport? _tsc;
+
+  /// Inputs from the first tests-match run, reused so fixes are graded on
+  /// the same test (and don't cost another model call).
+  List<TestCase>? _cases;
+  String? _autoFixNote;
   bool _showDetails = false;
 
   MigrationPlan? _plan;
@@ -84,11 +102,18 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
   bool _showMigrateFiles = false;
   bool? _buildOk;
   bool _buildWatching = false;
+  DateTime _lastProgressPaint = DateTime(0);
+  String _migrateSummary = '';
+
+  /// Output paths for the changed-files list, resolved once per migration.
+  List<({String rel, String path, String? note, bool failed})> _changedLinks = const [];
+  List<({String rel, String path})> _leftoverLinks = const [];
 
   @override
   void initState() {
     super.initState();
     _kind = _defaultKind();
+    _refreshTargetExists();
     widget.runService.addListener(_onRunChanged);
     _loadPlan();
   }
@@ -99,6 +124,7 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
     if (oldWidget.openPath != widget.openPath) {
       final kinds = TranslationKind.forPath(widget.openPath);
       if (!kinds.contains(_kind)) _kind = kinds.firstOrNull;
+      _refreshTargetExists();
     }
     if (oldWidget.rootPath != widget.rootPath) {
       _migrated = null;
@@ -116,6 +142,15 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
     widget.runService.removeListener(_onRunChanged);
     if (_busy || _migrating) widget.ollama.cancelChat();
     super.dispose();
+  }
+
+  Future<void> _refreshTargetExists() async {
+    final path = widget.openPath;
+    final kind = _kind;
+    final exists = path != null &&
+        kind != null &&
+        await File(kind.targetPath(path)).exists();
+    if (mounted && exists != _targetExists) setState(() => _targetExists = exists);
   }
 
   TranslationKind? _defaultKind() =>
@@ -153,14 +188,18 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
       final written = await widget.writeFile(target, code);
       if (!written.ok) throw Exception(written.error ?? 'Write failed');
       setState(() {
+        _targetExists = true;
         _doneKind = kind;
         _sourcePath = path;
         _sourceCode = source;
         _targetPath = target;
         _equiv = null;
         _tsc = null;
+        _cases = null;
+        _autoFixNote = null;
       });
       await _runCheck();
+      if (_autoFixEnabled) await _autoFix();
     } on ChatCancelledException {
       // User pressed Cancel.
     } catch (e) {
@@ -204,8 +243,12 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
         sourcePath: _sourcePath!,
         model: widget.model,
         onStatus: _setStatus,
+        cases: _cases,
       );
-      if (!mounted || _cancelRequested) return;
+      if (!mounted) return;
+      if (report.cases.isNotEmpty) {
+        _cases ??= [for (final c in report.cases) c.testCase];
+      }
       setState(() {
         _equiv = report;
         _showDetails = !report.allMatch;
@@ -213,31 +256,71 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
     }
   }
 
-  Future<void> _fix() async {
-    final kind = _doneKind;
-    final target = _targetPath;
-    if (kind == null || target == null) return;
-    final feedback = kind.check == TranslationCheck.tsc
-        ? _tsc?.feedback() ?? ''
-        : _equiv?.feedback() ?? '';
-    if (feedback.trim().isEmpty) return;
+  /// Current check results as one value for [autoFix].
+  _Checks get _checks => (equiv: _equiv, tsc: _tsc);
 
-    _start('Asking ${widget.model} to fix…');
-    try {
-      final current = await File(target).readAsString();
-      final code = await _translator.repair(
-        kind,
+  static bool _passing(_Checks c) =>
+      (c.equiv?.allMatch ?? false) || (c.tsc?.clean ?? false);
+
+  /// A check ran and failed (as opposed to not being able to run).
+  static bool _fixable(_Checks c) {
+    if (c.equiv != null) return c.equiv!.error == null && !c.equiv!.allMatch;
+    if (c.tsc != null) return c.tsc!.error == null && !c.tsc!.clean;
+    return false;
+  }
+
+  /// Higher is better: matching cases, or fewer tsc errors.
+  static int _score(_Checks c) => c.equiv != null
+      ? c.equiv!.matched
+      : -(c.tsc?.diagnostics.length ?? 1 << 20);
+
+  /// Repairs until the check passes or [_maxAutoFix] attempts; never leaves
+  /// a version worse than the best one seen.
+  Future<void> _autoFix() async {
+    if (!_fixable(_checks) || !mounted) return;
+    final target = _targetPath!;
+    final outcome = await autoFix<_Checks>(
+      maxAttempts: _maxAutoFix,
+      code: await File(target).readAsString(),
+      report: _checks,
+      passing: _passing,
+      fixable: _fixable,
+      score: _score,
+      isCancelled: () => _cancelRequested || !mounted,
+      onAttempt: (n) => _setStatus('Auto-fix $n/$_maxAutoFix: asking ${widget.model}…'),
+      repair: (code, report) => _translator.repair(
+        _doneKind!,
         _sourceCode!,
         _sourcePath!,
-        current,
-        feedback,
+        code,
+        _doneKind!.check == TranslationCheck.tsc
+            ? report.tsc!.feedback()
+            : report.equiv!.feedback(),
         model: widget.model,
-      );
-      if (_cancelRequested) return;
-      if (code.trim().isEmpty) throw Exception('Model returned no code.');
-      final written = await widget.writeFile(target, code);
-      if (!written.ok) throw Exception(written.error ?? 'Write failed');
-      await _runCheck();
+      ),
+      write: (code) async {
+        final written = await widget.writeFile(target, code);
+        if (!written.ok) throw Exception(written.error ?? 'Write failed');
+      },
+      check: () async {
+        await _runCheck();
+        return _checks;
+      },
+    );
+    if (!mounted || outcome.cancelled) return;
+    setState(() {
+      _equiv = outcome.report.equiv;
+      _tsc = outcome.report.tsc;
+      _autoFixNote = outcome.note;
+    });
+  }
+
+  Future<void> _fix() async {
+    if (_doneKind == null || _targetPath == null) return;
+    _start('Asking ${widget.model} to fix…');
+    try {
+      _autoFixNote = null;
+      await _autoFix();
     } on ChatCancelledException {
       // Cancelled.
     } catch (e) {
@@ -277,14 +360,19 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
 
   // -------------------------------------------------------------- migration
 
-  Future<void> _loadPlan() async {
+  Future<void> _loadPlan({bool force = false}) async {
     final root = widget.rootPath;
     if (root == null) {
       setState(() => _plan = null);
       return;
     }
+    if (!force && _planCache.containsKey(root)) {
+      setState(() => _plan = _planCache[root]);
+      return;
+    }
     setState(() => _planLoading = true);
     final plan = await NextToReactMigration.plan(root);
+    _planCache[root] = plan;
     if (!mounted || widget.rootPath != root) return;
     setState(() {
       _plan = plan;
@@ -308,8 +396,13 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
         plan,
         model: widget.model,
         isCancelled: () => _migrateCancel,
+        autoFixPasses: _autoFixEnabled ? 1 : 0,
         onProgress: (done, total, item) {
           if (!mounted) return;
+          // Copying thousands of assets is fast; repainting per file is not.
+          final now = DateTime.now();
+          if (done < total && now.difference(_lastProgressPaint).inMilliseconds < 100) return;
+          _lastProgressPaint = now;
           setState(() {
             _migrateDone = done;
             _migrateTotal = total;
@@ -317,8 +410,14 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
           });
         },
       );
+      final links = await _resolveLinks(plan, result);
+      _planCache.remove(plan.root); // items were mutated; rescan next time
       if (!mounted) return;
-      setState(() => _migrated = result);
+      setState(() {
+        _migrated = result;
+        _changedLinks = links.changed;
+        _leftoverLinks = links.leftovers;
+      });
     } on ChatCancelledException {
       if (mounted) {
         setState(() => _migrated = MigrationResult(
@@ -441,13 +540,18 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
             _Chip(
               label: k.label,
               selected: k == kind,
-              onTap: _busy ? null : () => setState(() => _kind = k),
+              onTap: _busy
+                  ? null
+                  : () {
+                      setState(() => _kind = k);
+                      _refreshTargetExists();
+                    },
             ),
         ],
       ));
       if (kind != null) {
         final target = kind.targetPath(path);
-        final exists = File(target).existsSync();
+        final exists = _targetExists;
         widgets.add(const SizedBox(height: 8));
         widgets.add(_kv('Writes', p.basename(target)));
         widgets.add(_kv(
@@ -474,6 +578,27 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
               onTap: _busy || _migrating ? null : _translate,
             ),
           ],
+        ));
+        widgets.add(const SizedBox(height: 6));
+        widgets.add(InkWell(
+          onTap: _busy ? null : () => setState(() => _autoFixEnabled = !_autoFixEnabled),
+          borderRadius: BorderRadius.circular(4),
+          child: Row(
+            children: [
+              Icon(
+                _autoFixEnabled ? Icons.check_box : Icons.check_box_outline_blank,
+                size: 15,
+                color: _autoFixEnabled ? CursorColors.accentSoft : CursorColors.fgMuted,
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  'Auto-fix errors (up to $_maxAutoFix tries)',
+                  style: TextStyle(color: CursorColors.fg, fontSize: 11),
+                ),
+              ),
+            ],
+          ),
         ));
       }
     }
@@ -527,6 +652,14 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
                     color: CursorColors.fgMuted,
                   ),
                 ],
+              ),
+            ),
+          if (_autoFixNote != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(
+                _autoFixNote!,
+                style: TextStyle(color: CursorColors.fgMuted, fontSize: 11, height: 1.35),
               ),
             ),
           if (_showDetails) ..._details(kind),
@@ -657,13 +790,27 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
     if (_planLoading) return [_progressRow('Scanning project…')];
     final plan = _plan;
     if (plan == null) {
-      return [_hint('Open a Next.js project to migrate it to React + Vite.')];
+      return [
+        _hint('Open a Next.js project to migrate it to React + Vite.'),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: _TextAction(label: 'Rescan', onTap: () => _loadPlan(force: true)),
+        ),
+      ];
     }
 
     final widgets = <Widget>[
-      Text(
-        'Next.js → React + Vite',
-        style: TextStyle(color: CursorColors.fgBright, fontSize: 12, fontWeight: FontWeight.w600),
+      Row(
+        children: [
+          Expanded(
+            child: Text(
+              'Next.js → React + Vite',
+              style: TextStyle(color: CursorColors.fgBright, fontSize: 12, fontWeight: FontWeight.w600),
+            ),
+          ),
+          if (!_migrating)
+            _TextAction(label: 'Rescan', onTap: () => _loadPlan(force: true)),
+        ],
       ),
       const SizedBox(height: 6),
       _kv('Router', plan.routerLabel.isEmpty ? 'none found' : plan.routerLabel),
@@ -727,7 +874,7 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
           onTap: _busy
               ? null
               : () async {
-                  if (_migrated != null) await _loadPlan();
+                  if (_migrated != null) await _loadPlan(force: true);
                   await _migrate();
                 },
         ),
@@ -735,7 +882,7 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
     ));
     widgets.add(Padding(
       padding: const EdgeInsets.only(top: 6),
-      child: _hint('The original project is not modified. Rewrite rules run first, and the model only handles files that still use Next.js APIs.'),
+      child: _hint('The original project is not modified. Rewrite rules run first, and the model only handles files that still use Next.js APIs.${_autoFixEnabled ? ' Files that still import next/* afterwards get one auto-fix retry.' : ''}'),
     ));
 
     final done = _migrated;
@@ -745,10 +892,7 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
 
   Widget _migrationCard(MigrationPlan plan, MigrationResult done) {
     final leftovers = done.leftoverNextImports;
-    final failed = plan.items.where((i) => i.failed).toList();
-    final changed = plan.items
-        .where((i) => i.action == MigrateAction.rules || i.action == MigrateAction.model || i.failed)
-        .toList();
+    final changed = _changedLinks;
 
     return Container(
       margin: const EdgeInsets.only(top: 12),
@@ -785,13 +929,11 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
             ],
             const SizedBox(height: 8),
             Text(
-              '${plan.count(MigrateAction.copy)} copied · ${plan.count(MigrateAction.rules)} rewritten · '
-              '${plan.count(MigrateAction.model)} by model · ${plan.count(MigrateAction.skip)} skipped'
-              '${failed.isEmpty ? '' : ' · ${failed.length} need review'}',
+              _migrateSummary,
               style: TextStyle(color: CursorColors.fgMuted, fontSize: 11, height: 1.35),
             ),
-            for (final rel in leftovers)
-              _fileLink(done.outputDir, rel, color: _amber),
+            for (final l in _leftoverLinks)
+              _fileLink(l.rel, l.path, color: _amber),
             if (changed.isNotEmpty) ...[
               const SizedBox(height: 6),
               InkWell(
@@ -804,12 +946,12 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
                 ),
               ),
               if (_showMigrateFiles)
-                for (final i in changed)
+                for (final c in changed)
                   _fileLink(
-                    done.outputDir,
-                    i.rel,
-                    note: i.reason,
-                    color: i.failed ? _red : null,
+                    c.rel,
+                    c.path,
+                    note: c.note,
+                    color: c.failed ? _red : null,
                   ),
             ],
           ],
@@ -838,12 +980,50 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
     );
   }
 
-  Widget _fileLink(String root, String rel, {String? note, Color? color}) {
-    // Renamed configs (.js → .cjs) live under a different name in the output.
-    var path = p.joinAll([root, ...rel.split('/')]);
-    if (!File(path).existsSync() && File('${p.withoutExtension(path)}.cjs').existsSync()) {
-      path = '${p.withoutExtension(path)}.cjs';
+  /// Resolves result-list paths once, off the build path.
+  Future<
+      ({
+        List<({String rel, String path, String? note, bool failed})> changed,
+        List<({String rel, String path})> leftovers,
+      })> _resolveLinks(MigrationPlan plan, MigrationResult result) async {
+    Future<String> outPath(String rel) async {
+      // Renamed configs (.js → .cjs) live under a different name in the output.
+      final path = p.joinAll([result.outputDir, ...rel.split('/')]);
+      final cjs = '${p.withoutExtension(path)}.cjs';
+      if (!await File(path).exists() && await File(cjs).exists()) return cjs;
+      return path;
     }
+
+    var copied = 0, rewritten = 0, model = 0, skipped = 0, failed = 0;
+    final changed = <({String rel, String path, String? note, bool failed})>[];
+    for (final i in plan.items) {
+      switch (i.action) {
+        case MigrateAction.copy:
+          copied++;
+        case MigrateAction.rules:
+          rewritten++;
+        case MigrateAction.model:
+          model++;
+        case MigrateAction.skip:
+          skipped++;
+      }
+      if (i.failed) failed++;
+      if (i.action == MigrateAction.rules || i.action == MigrateAction.model || i.failed) {
+        changed.add((rel: i.rel, path: await outPath(i.rel), note: i.reason, failed: i.failed));
+      }
+    }
+    _migrateSummary = '$copied copied · $rewritten rewritten · $model by model · $skipped skipped'
+        '${failed == 0 ? '' : ' · $failed need review'}';
+    return (
+      changed: changed,
+      leftovers: [
+        for (final rel in result.leftoverNextImports)
+          (rel: rel, path: p.joinAll([result.outputDir, ...rel.split('/')])),
+      ],
+    );
+  }
+
+  Widget _fileLink(String rel, String path, {String? note, Color? color}) {
     return InkWell(
       onTap: () => widget.onOpenFile(path),
       child: Padding(

@@ -64,7 +64,7 @@ class ShellExec {
       timeout,
       onTimeout: () {
         timedOut = true;
-        process.kill(ProcessSignal.sigkill);
+        _killTree(process);
         return -1;
       },
     );
@@ -74,6 +74,22 @@ class ShellExec {
       stderr: await err.timeout(const Duration(seconds: 2), onTimeout: () => ''),
       timedOut: timedOut,
     );
+  }
+
+  /// Killing the `cmd`/`zsh` wrapper alone leaves its child (node, tsc…)
+  /// running in the background, so take down the whole tree.
+  static void _killTree(Process process) {
+    if (Platform.isWindows) {
+      try {
+        Process.runSync('taskkill', ['/PID', '${process.pid}', '/T', '/F']);
+        return;
+      } catch (_) {}
+    } else {
+      try {
+        Process.runSync('pkill', ['-KILL', '-P', '${process.pid}']);
+      } catch (_) {}
+    }
+    process.kill(ProcessSignal.sigkill);
   }
 
   static String _shQuote(String s) {
@@ -107,9 +123,14 @@ class ShellExec {
     return _python;
   }
 
+  static bool? _hasNode;
+
   static Future<bool> hasNode() async {
+    if (_hasNode == true) return true;
     final r = await run('node', const ['--version'],
         timeout: const Duration(seconds: 8));
+    // Only cache success, so installing Node mid-session is picked up.
+    if (r.ok) _hasNode = true;
     return r.ok;
   }
 }

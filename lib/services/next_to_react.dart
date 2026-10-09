@@ -522,7 +522,12 @@ class NextToReactMigration {
     return false;
   }
 
-  static List<ChatMessage> modelPrompt(String code, String rel, MigrateRole role) {
+  static List<ChatMessage> modelPrompt(
+    String code,
+    String rel,
+    MigrateRole role, {
+    String? feedback,
+  }) {
     final roleNote = switch (role) {
       MigrateRole.page => 'This file is a route page. Route params come from useParams(); query string from useSearchParams().',
       MigrateRole.layout => 'This file is a layout. It must NOT render <html>, <head> or <body>; render only the wrapper markup around {children}.',
@@ -549,7 +554,9 @@ class NextToReactMigration {
       ),
       ChatMessage(
         role: 'user',
-        content: 'File: $rel\n$roleNote\n\n```\n$code\n```',
+        content: 'File: $rel\n$roleNote\n'
+            '${feedback == null ? '' : '\nA previous conversion was rejected: $feedback\n'}'
+            '\n```\n$code\n```',
       ),
     ];
   }
@@ -561,6 +568,9 @@ class NextToReactMigration {
     String? model,
     required bool Function() isCancelled,
     void Function(int done, int total, MigrateItem item)? onProgress,
+
+    /// Retry rounds for files that still import `next/*`.
+    int autoFixPasses = 1,
   }) async {
     final out = Directory(plan.outputDir);
     await out.create(recursive: true);
@@ -589,7 +599,12 @@ class NextToReactMigration {
     if (plan.items.isNotEmpty) onProgress?.call(done, total, plan.items.last);
 
     await _writeScaffold(plan);
-    final leftovers = await leftoverNextImports(plan.outputDir);
+    var leftovers = await leftoverNextImports(plan.outputDir);
+    for (var pass = 0; pass < autoFixPasses && leftovers.isNotEmpty; pass++) {
+      if (isCancelled()) break;
+      await _autoFixLeftovers(plan, leftovers, model, onProgress);
+      leftovers = await leftoverNextImports(plan.outputDir);
+    }
     await File(p.join(plan.outputDir, 'MIGRATION.md'))
         .writeAsString(report(plan, leftovers));
 
@@ -666,6 +681,52 @@ class NextToReactMigration {
     }
 
     await _write(plan, destRel, code);
+  }
+
+  /// Re-converts output files the first pass left importing `next/*`,
+  /// telling the model exactly which imports remain.
+  Future<void> _autoFixLeftovers(
+    MigrationPlan plan,
+    List<String> leftovers,
+    String? model,
+    void Function(int done, int total, MigrateItem item)? onProgress,
+  ) async {
+    final byRel = {for (final i in plan.items) i.rel: i};
+    for (var n = 0; n < leftovers.length; n++) {
+      final rel = leftovers[n];
+      final item = byRel[rel] ??
+          MigrateItem(rel: rel, action: MigrateAction.model, role: MigrateRole.module);
+      onProgress?.call(n, leftovers.length, item);
+      final file = File(p.joinAll([plan.outputDir, ...rel.split('/')]));
+      final code = (await file.readAsString())
+          .replaceFirst(RegExp(r'^// TODO\(tryhard-migrate\).*\n'), '');
+      final imports = {
+        for (final m in RegExp(r'''['"](next(?:/[^'"]*)?)['"]''').allMatches(code)) m[1]!,
+      };
+      try {
+        final reply = await ollama.chat(
+          messages: modelPrompt(
+            code,
+            rel,
+            item.role,
+            feedback: 'it still imports ${imports.join(', ')}. Remove every one of them.',
+          ),
+          model: model,
+        );
+        final converted = CodeTranslator.extractCode(reply);
+        // Only accept a retry that actually got rid of Next.js.
+        if (converted.trim().isEmpty || nextImportRe.hasMatch(converted)) continue;
+        await file.writeAsString(converted, flush: true);
+        item
+          ..failed = false
+          ..action = MigrateAction.model
+          ..reason = 'model (auto-fixed)';
+      } on ChatCancelledException {
+        rethrow;
+      } catch (_) {
+        // Keep the first-pass output; the report lists it as a leftover.
+      }
+    }
   }
 
   Future<void> _write(MigrationPlan plan, String rel, String content) async {

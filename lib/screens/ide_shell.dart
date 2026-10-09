@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:code_text_field/code_text_field.dart';
@@ -85,6 +86,7 @@ class _IdeShellState extends State<IdeShell> {
   List<String> _fileHits = const [];
   bool _fileSearchOpen = false;
   int _fileSearchGen = 0;
+  Timer? _reindexTimer;
 
   @override
   void initState() {
@@ -142,6 +144,7 @@ class _IdeShellState extends State<IdeShell> {
 
   @override
   void dispose() {
+    _reindexTimer?.cancel();
     _editor.removeListener(_onEditorChanged);
     _editor.dispose();
     _editorFocus.dispose();
@@ -573,9 +576,14 @@ class _IdeShellState extends State<IdeShell> {
     return result;
   }
 
+  /// Re-index after edits. Debounced so a burst of saves, AI edits or a
+  /// translation + its fix pass triggers one incremental build, not several.
   void _refreshRepoIndex() {
     if (_rootPath == null) return;
-    _repoIndex.build();
+    _reindexTimer?.cancel();
+    _reindexTimer = Timer(const Duration(seconds: 3), () {
+      if (mounted && _rootPath != null) _repoIndex.build();
+    });
   }
 
   /// Write a generated file (e.g. a translation) and show it as a diff.
@@ -591,12 +599,22 @@ class _IdeShellState extends State<IdeShell> {
     } catch (e) {
       return ApplyEditResult.fail('Write failed: $e');
     }
+    // Successive rewrites (auto-fix attempts) extend the same diff, so it keeps
+    // showing original → latest and Discard restores the original.
+    final prior = _editorDiff;
+    // Only while still pending: after Keep, the kept state is the new baseline.
+    final chained = _showEditorDiff &&
+        prior != null &&
+        prior.ok &&
+        prior.path != null &&
+        p.equals(prior.path!, path) &&
+        prior.newContent == oldContent;
     final result = ApplyEditResult(
       ok: true,
       path: path,
-      oldContent: oldContent,
+      oldContent: chained ? prior.oldContent : oldContent,
       newContent: content,
-      created: created,
+      created: chained ? prior.created : created,
     );
     if (!mounted) return result;
     final isOpen = _openPath != null && p.equals(_openPath!, path);

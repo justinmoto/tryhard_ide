@@ -93,6 +93,9 @@ class EquivalenceCheck {
     required String sourcePath,
     String? model,
     void Function(String status)? onStatus,
+
+    /// Reuse earlier inputs so attempts are graded on the same test.
+    List<TestCase>? cases,
   }) async {
     final fns = sourceLang == Lang.js
         ? extractJsFunctions(sourceCode)
@@ -112,18 +115,19 @@ class EquivalenceCheck {
       return const EquivalenceReport(error: 'Node.js not found on PATH.');
     }
 
-    onStatus?.call('Generating test inputs…');
-    final List<TestCase> cases;
-    try {
-      final reply = await ollama.chat(
-        messages: casePrompt(sourceCode, fns, sourceLang),
-        model: model,
-      );
-      cases = parseCases(reply, fns);
-    } on ChatCancelledException {
-      rethrow;
-    } catch (e) {
-      return EquivalenceReport(error: 'Test input generation failed: $e');
+    if (cases == null || cases.isEmpty) {
+      onStatus?.call('Generating test inputs…');
+      try {
+        final reply = await ollama.chat(
+          messages: casePrompt(sourceCode, fns, sourceLang),
+          model: model,
+        );
+        cases = parseCases(reply, fns);
+      } on ChatCancelledException {
+        rethrow;
+      } catch (e) {
+        return EquivalenceReport(error: 'Test input generation failed: $e');
+      }
     }
     if (cases.isEmpty) {
       return const EquivalenceReport(

@@ -231,6 +231,7 @@ class RepoIndex extends ChangeNotifier {
       final nextFiles = <String, _FileMeta>{};
       final nextChunks = <CodeChunk>[];
       var scanned = 0;
+      var changed = useForce || modelChanged;
       for (final entry in found.entries) {
         if (gen != _gen) return;
         final rel = entry.key;
@@ -248,6 +249,7 @@ class RepoIndex extends ChangeNotifier {
             final content = await entry.value.readAsString();
             nextFiles[rel] = meta;
             nextChunks.addAll(_chunkFile(rel, content));
+            changed = true;
           }
         } catch (_) {
           // Unreadable or non-UTF8 file — skip it.
@@ -258,15 +260,18 @@ class RepoIndex extends ChangeNotifier {
         }
       }
       if (gen != _gen) return;
+      // Deleted files.
+      if (nextFiles.length != _files.length) changed = true;
       _files = nextFiles;
       _chunks = nextChunks;
 
-      await _embedMissing(gen);
+      if (await _embedMissing(gen) > 0) changed = true;
       if (gen != _gen) return;
 
       _embedModel = hasVectors ? ollama.embedModel : null;
       _status = _readyStatus();
-      await _save();
+      // Saving copies every vector to an isolate; skip it when nothing moved.
+      if (changed) await _save();
     } catch (e) {
       if (gen != _gen) return;
       _status = 'Index failed: $e';
@@ -284,26 +289,29 @@ class RepoIndex extends ChangeNotifier {
     }
   }
 
-  Future<void> _embedMissing(int gen) async {
+  /// Embeds chunks without vectors; returns how many were embedded.
+  Future<int> _embedMissing(int gen) async {
     final pending = _chunks.where((c) => c.vector == null).toList();
-    if (pending.isEmpty) return;
+    if (pending.isEmpty) return 0;
+    var embedded = 0;
     _progressTotal = pending.length;
     _progressDone = 0;
     for (var i = 0; i < pending.length; i += _embedBatch) {
-      if (gen != _gen) return;
+      if (gen != _gen) return embedded;
       final batch = pending.sublist(i, math.min(i + _embedBatch, pending.length));
       try {
         final vectors = await ollama.embedBatch([
           for (final c in batch) _docPrefix + _embedText(c),
         ]);
-        if (gen != _gen) return;
+        if (gen != _gen) return embedded;
         for (var j = 0; j < batch.length && j < vectors.length; j++) {
           batch[j].vector = _normalize(vectors[j]);
+          embedded++;
         }
       } catch (e) {
         // No embed model / Ollama offline: keep keyword-only search.
         _embedError = '$e'.replaceFirst('Exception: ', '');
-        return;
+        return embedded;
       }
       _progressDone = math.min(i + _embedBatch, pending.length);
       _status = 'Embedding $_progressDone/$_progressTotal chunks…';
@@ -311,6 +319,7 @@ class RepoIndex extends ChangeNotifier {
       // Checkpoint big builds so a crash or close doesn't lose everything.
       if ((i ~/ _embedBatch) % 40 == 39) await _save();
     }
+    return embedded;
   }
 
   /// Top [k] chunks for [query], hybrid of embeddings and keywords.
