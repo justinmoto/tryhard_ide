@@ -136,7 +136,7 @@ class _ChatSidebarState extends State<ChatSidebar> {
     _loadProjectFiles();
     _syncRepoIndex();
     _loadSessions();
-    _initSpeech();
+    // Do not init speech here — macOS TCC can abort the process on launch.
   }
 
   Future<void> _syncRepoIndex() async {

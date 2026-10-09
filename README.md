@@ -14,9 +14,7 @@ A Flutter desktop + mobile IDE that talks to a local LLM runtime (Ollama), a loc
 
 ## Platforms
 
-- **macOS** — primary demo target
-- **iOS / Android** — mobile shell (chat + lighter tooling)
-- **Web** — UI only; file I/O limited
+- **macOS/Desktop** — primary demo target
 
 ## Prerequisites
 
@@ -39,10 +37,6 @@ cd ~/Desktop/tryhard-ide
 # Desktop (primary)
 flutter run -d macos
 
-# Mobile
-flutter run -d ios
-# or
-flutter run -d android
 ```
 
 ## MVP features
