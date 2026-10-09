@@ -50,6 +50,13 @@ class _IdeShellState extends State<IdeShell> {
     '.sqlite', '.pyc', '.pyo', '.parcel', '.snap',
   };
 
+  static const _defaultSidebarWidth = 260.0;
+  static const _defaultChatWidth = 380.0;
+  static const _minSidebarWidth = 180.0;
+  static const _maxSidebarWidth = 480.0;
+  static const _minChatWidth = 280.0;
+  static const _maxChatWidth = 640.0;
+
   OllamaStatus? _status;
   String? _openPath;
   String? _rootPath;
@@ -63,6 +70,8 @@ class _IdeShellState extends State<IdeShell> {
   bool _showEditorDiff = false;
   ApplyEditResult? _editorDiff;
   ActivityItem _activity = ActivityItem.explorer;
+  double _sidebarWidth = _defaultSidebarWidth;
+  double _chatWidth = _defaultChatWidth;
 
   @override
   void initState() {
@@ -533,31 +542,39 @@ class _IdeShellState extends State<IdeShell> {
                 onSelect: _onActivity,
                 onToggleChat: () => setState(() => _chatOpen = !_chatOpen),
               ),
-              if (_sidebarOpen)
+              if (_sidebarOpen) ...[
                 SizedBox(
-                  width: 260,
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      border: Border(
-                        right: BorderSide(color: CursorColors.border),
-                      ),
-                    ),
-                    child: sidebar,
-                  ),
+                  width: _sidebarWidth,
+                  child: sidebar,
                 ),
+                _VerticalResizeHandle(
+                  onDrag: (dx) {
+                    setState(() {
+                      _sidebarWidth = (_sidebarWidth + dx).clamp(
+                        _minSidebarWidth,
+                        _maxSidebarWidth,
+                      );
+                    });
+                  },
+                ),
+              ],
               Expanded(child: editorPane),
-              if (_chatOpen)
-                SizedBox(
-                  width: 380,
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      border: Border(
-                        left: BorderSide(color: CursorColors.border),
-                      ),
-                    ),
-                    child: chat,
-                  ),
+              if (_chatOpen) ...[
+                _VerticalResizeHandle(
+                  onDrag: (dx) {
+                    setState(() {
+                      _chatWidth = (_chatWidth - dx).clamp(
+                        _minChatWidth,
+                        _maxChatWidth,
+                      );
+                    });
+                  },
                 ),
+                SizedBox(
+                  width: _chatWidth,
+                  child: chat,
+                ),
+              ],
             ],
           )
         : Column(
@@ -874,6 +891,45 @@ class _IdeShellState extends State<IdeShell> {
               ),
             ),
         ],
+      ),
+    );
+  }
+}
+
+class _VerticalResizeHandle extends StatefulWidget {
+  const _VerticalResizeHandle({required this.onDrag});
+
+  final ValueChanged<double> onDrag;
+
+  @override
+  State<_VerticalResizeHandle> createState() => _VerticalResizeHandleState();
+}
+
+class _VerticalResizeHandleState extends State<_VerticalResizeHandle> {
+  bool _active = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.resizeColumn,
+      onEnter: (_) => setState(() => _active = true),
+      onExit: (_) => setState(() => _active = false),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onHorizontalDragUpdate: (details) => widget.onDrag(details.delta.dx),
+        onHorizontalDragStart: (_) => setState(() => _active = true),
+        onHorizontalDragEnd: (_) => setState(() => _active = false),
+        onHorizontalDragCancel: () => setState(() => _active = false),
+        child: SizedBox(
+          width: 5,
+          child: Center(
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 80),
+              width: 1,
+              color: _active ? CursorColors.accent : CursorColors.border,
+            ),
+          ),
+        ),
       ),
     );
   }
