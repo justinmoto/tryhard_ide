@@ -96,7 +96,7 @@ class TsCheck {
 
     var r = await tsc(_resolutions.first);
     // TS5023 unknown option, TS6046 bad value, TS5108 removed value.
-    if (RegExp(r'error TS(5023|6046|5108)').hasMatch('${r.stdout}${r.stderr}')) {
+    if (RegExp(r'error TS(5023|6046|5108)\b').hasMatch('${r.stdout}${r.stderr}')) {
       r = await tsc(_resolutions.last);
     }
 

@@ -53,6 +53,12 @@ void main() {
       expect(e.message, contains('Unexpected closing "head" tag'));
     });
 
+    test('running dev server (esbuild dep scan) → importing file', () {
+      final e = NextToReactMigration.parseBuildError(fixture('dev_running', root), root)!;
+      expect(rel(e), 'src/app/page.tsx');
+      expect(e.message, contains('No matching export in "src/components/Header.tsx" for import "Missing"'));
+    });
+
     test('no error / file outside the project', () {
       expect(NextToReactMigration.parseBuildError(['vite v5', '✓ built in 1s'], root), isNull);
       final e = NextToReactMigration.parseBuildError(

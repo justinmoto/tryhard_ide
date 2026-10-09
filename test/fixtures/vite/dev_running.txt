@@ -1,0 +1,25 @@
+
+  [32m[1mVITE[22m v5.4.21[39m  [2mready in [0m[1m630[22m[2m[0m ms[22m
+
+  [32m➜[39m  [1mLocal[22m:   [36mhttp://localhost:[1m5799[22m/[39m
+[2m  [32m➜[39m  [1mNetwork[22m[2m: use [22m[1m--host[22m[2m to expose[22m
+Error: [31m  Failed to scan for dependencies from entries:
+  {ROOT}/index.html
+
+  [39m[31mX [41;31m[[41;97mERROR[41;31m][0m [1mNo matching export in "src/components/Header.tsx" for import "Missing"[0m
+
+    src/app/page.tsx:1:9:
+[37m      1 │ import { [32mMissing[37m } from '@/components/Header';
+        ╵          [32m~~~~~~~[0m
+
+
+    at failureErrorWithLog ({ROOTW}\node_modules\esbuild\lib\main.js:1472:15)
+    at {ROOTW}\node_modules\esbuild\lib\main.js:945:25
+    at runOnEndCallbacks ({ROOTW}\node_modules\esbuild\lib\main.js:1315:45)
+    at buildResponseToResult ({ROOTW}\node_modules\esbuild\lib\main.js:943:7)
+    at {ROOTW}\node_modules\esbuild\lib\main.js:955:9
+    at new Promise (<anonymous>)
+    at requestCallbacks.on-end ({ROOTW}\node_modules\esbuild\lib\main.js:954:54)
+    at handleRequest ({ROOTW}\node_modules\esbuild\lib\main.js:647:17)
+    at handleIncomingPacket ({ROOTW}\node_modules\esbuild\lib\main.js:672:7)
+    at Socket.readFromStdout ({ROOTW}\node_modules\esbuild\lib\main.js:600:7)

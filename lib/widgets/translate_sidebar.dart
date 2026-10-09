@@ -106,6 +106,9 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
   int _buildFixAttempts = 0;
   final _buildFixed = <String>[];
   String? _buildFixNote;
+  int? _lastRunExit;
+  bool _runHasError = false;
+  String? _runKey;
   DateTime _lastProgressPaint = DateTime(0);
   String _migrateSummary = '';
 
@@ -162,63 +165,105 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
 
   void _onRunChanged() {
     final rs = widget.runService;
-    if (!_buildWatching || rs.activeTarget?.id != _buildTargetId) return;
+    if (!_buildWatching || rs.activeTarget?.id != _buildTargetId) {
+      // Repaint once when any run ends, so the Fix error button can show.
+      final exit = rs.isRunning ? null : rs.exitCode;
+      if (exit != _lastRunExit) setState(() => _lastRunExit = exit);
+      // Dev servers report errors but keep running: watch the newest line
+      // (checking only the last one keeps this O(1) per output line).
+      final lines = rs.lines;
+      final runKey = '${rs.activeTarget?.id}:${rs.workingDirectory}';
+      if (runKey != _runKey || lines.length < 3) {
+        _runKey = runKey;
+        if (_runHasError) setState(() => _runHasError = false);
+      }
+      if (rs.isRunning &&
+          !_runHasError &&
+          lines.isNotEmpty &&
+          _errorLine.hasMatch(lines.last)) {
+        setState(() => _runHasError = true);
+      }
+      return;
+    }
     if (rs.isRunning || rs.exitCode == null) return;
     // Clear first: the run service notifies again after exit.
     _buildWatching = false;
+    _lastRunExit = rs.exitCode;
     if (rs.exitCode == 0) {
       setState(() {
         _buildOk = true;
         if (_buildFixed.isNotEmpty) {
-          _buildFixNote = 'Build fixed after $_buildFixAttempts auto-fix '
-              'attempt${_buildFixAttempts == 1 ? '' : 's'}.';
+          _buildFixNote = 'Build fixed after $_buildFixAttempts '
+              'fix${_buildFixAttempts == 1 ? '' : 'es'}.';
         }
       });
     } else if (_autoFixEnabled && _buildFixAttempts < _maxAutoFix) {
-      _autoFixBuild(List.of(rs.lines));
+      _fixRunError(auto: true);
     } else {
       setState(() {
         _buildOk = false;
-        if (_buildFixAttempts > 0) {
-          _buildFixNote = 'Auto-fix tried $_buildFixAttempts time'
-              '${_buildFixAttempts == 1 ? '' : 's'}; the build still fails.';
-        }
+        _buildFixNote = _buildFixAttempts > 0
+            ? 'Tried $_buildFixAttempts fix${_buildFixAttempts == 1 ? '' : 'es'}; the build still fails. Press Fix error to try again.'
+            : null;
       });
     }
   }
 
-  /// Reads the failed build's output, has the model fix the file named in
-  /// the error, and rebuilds (without reinstalling).
-  Future<void> _autoFixBuild(List<String> lines) async {
-    final out = _migrated?.outputDir;
-    if (out == null) return;
-    final error = NextToReactMigration.parseBuildError(lines, out);
+  static final _errorLine = RegExp(
+    r'error during build|Internal server error|\[vite\].*\b(error|failed)\b|\bERROR\b|SyntaxError|Failed to (resolve|compile)',
+    caseSensitive: false,
+  );
+
+  /// The Run panel shows a failure: a run that exited non-zero, or a
+  /// still-running command (dev server) that printed an error.
+  bool get _runFailed {
+    final rs = widget.runService;
+    if (rs.isRunning) return _runHasError;
+    return rs.exitCode != null && rs.exitCode != 0;
+  }
+
+  /// Reads the error in the Run panel, has the model fix the file it names,
+  /// then re-runs the same command. Used by auto-fix and the Fix error button.
+  Future<void> _fixRunError({required bool auto}) async {
+    final rs = widget.runService;
+    final root = rs.workingDirectory ?? _migrated?.outputDir;
+    if (root == null) return;
+    final lines = List.of(rs.lines);
+    final failedTarget = rs.activeTarget;
+
+    final error = NextToReactMigration.parseBuildError(lines, root);
     if (error?.file == null) {
       setState(() {
-        _buildOk = false;
-        _buildFixNote = 'Auto-fix: could not find which file broke the build. See the Run panel.';
+        if (failedTarget?.id == _buildTargetId) _buildOk = false;
+        _buildFixNote = error == null
+            ? 'No error found in the Run panel.'
+            : 'Could not tell which file caused the error. See the Run panel.';
       });
       return;
     }
-    final rel = p.relative(error!.file!, from: out).replaceAll(r'\', '/');
+    final rel = p.relative(error!.file!, from: root).replaceAll(r'\', '/');
     final attempt = ++_buildFixAttempts;
     setState(() {
       _buildFixing = true;
-      _buildFixNote = 'Auto-fix $attempt/$_maxAutoFix: fixing $rel…';
+      _buildOk = null;
+      _buildFixNote = auto
+          ? 'Auto-fix $attempt/$_maxAutoFix: fixing $rel…'
+          : 'Fixing $rel…';
     });
+
     String? fixed;
     try {
-      fixed = await _migration.fixBuildError(out, error, model: widget.model);
+      fixed = await _migration.fixBuildError(root, error, model: widget.model);
     } on ChatCancelledException {
       if (mounted) {
         setState(() {
           _buildFixing = false;
           _buildOk = false;
-          _buildFixNote = 'Auto-fix cancelled.';
+          _buildFixNote = 'Fix cancelled.';
         });
       }
       return;
-    } catch (e) {
+    } catch (_) {
       fixed = null;
     }
     if (!mounted) return;
@@ -226,23 +271,36 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
       setState(() {
         _buildFixing = false;
         _buildOk = false;
-        _buildFixNote = 'Auto-fix: the model returned no changes for $rel.';
+        _buildFixNote = 'The model returned no changes for $rel. Press Fix error to try again.';
       });
       return;
     }
+
+    // Re-run what failed. A build is watched for pass/fail (and may trigger
+    // another auto-fix); other commands such as `npm run dev` just restart.
+    final isBuild = failedTarget == null || failedTarget.id == _buildTargetId;
     setState(() {
       _buildFixing = false;
       _buildFixed.add(fixed!);
-      _buildWatching = true;
-      _buildFixNote = 'Auto-fix $attempt/$_maxAutoFix: fixed $fixed, rebuilding…';
+      _buildWatching = isBuild;
+      _buildFixNote = isBuild
+          ? 'Fixed $fixed, rebuilding…'
+          : 'Fixed $fixed, restarted ${failedTarget.label}.';
     });
     widget.onRunCommand(
+      root,
+      isBuild
+          ? const RunTarget(id: _buildTargetId, label: 'vite build', command: 'npm run build')
+          : failedTarget,
+    );
+  }
+
+  void _runApp() {
+    final out = _migrated?.outputDir;
+    if (out == null) return;
+    widget.onRunCommand(
       out,
-      RunTarget(
-        id: _buildTargetId,
-        label: 'vite build (auto-fix $attempt)',
-        command: 'npm run build',
-      ),
+      const RunTarget(id: 'migrate:dev', label: 'npm run dev', command: 'npm run dev'),
     );
   }
 
@@ -1000,7 +1058,7 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
             if (_buildOk != null || _buildWatching || _buildFixing) ...[
               const SizedBox(height: 6),
               if (_buildFixing)
-                const _Badge(icon: Icons.build_outlined, label: 'Auto-fixing build…', color: _amber)
+                const _Badge(icon: Icons.build_outlined, label: 'Fixing…', color: _amber)
               else if (_buildWatching)
                 _Badge(icon: Icons.hourglass_top, label: 'vite build running…', color: CursorColors.fgMuted)
               else
@@ -1009,6 +1067,8 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
                   label: _buildOk! ? 'vite build passed' : 'vite build failed',
                   color: _buildOk! ? _green : _red,
                 ),
+            ],
+            if (_buildFixNote != null || _buildFixed.isNotEmpty) ...[
               if (_buildFixNote != null)
                 Padding(
                   padding: const EdgeInsets.only(top: 6),
@@ -1018,13 +1078,25 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
                   ),
                 ),
               for (final rel in _buildFixed)
-                _fileLink(rel, p.joinAll([done.outputDir, ...rel.split('/')]), note: 'auto-fixed'),
-              if (_buildOk == false)
-                Padding(
-                  padding: const EdgeInsets.only(top: 4),
-                  child: _hint('Full error in the Run panel.'),
-                ),
+                _fileLink(rel, p.joinAll([done.outputDir, ...rel.split('/')]), note: 'fixed'),
             ],
+            if (!_buildFixing && !_buildWatching && (_buildOk == false || _runFailed)) ...[
+              const SizedBox(height: 8),
+              _PrimaryButton(
+                label: 'Fix error',
+                icon: Icons.build_outlined,
+                onTap: _busy || _migrating ? null : () => _fixRunError(auto: false),
+              ),
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: _hint('Sends the error in the Run panel to the model, fixes the file, then runs it again.'),
+              ),
+            ],
+            if (_buildFixing)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: _TextAction(label: 'Cancel fix', onTap: widget.ollama.cancelChat),
+              ),
             const SizedBox(height: 8),
             Text(
               _migrateSummary,
@@ -1067,6 +1139,8 @@ class _TranslateSidebarState extends State<TranslateSidebar> {
                   label: 'Install & build',
                   onTap: _buildWatching || _buildFixing ? null : _installAndBuild,
                 ),
+              if (_buildOk == true)
+                _TextAction(label: 'Run app', onTap: _runApp),
               _TextAction(
                 label: 'Open as workspace',
                 onTap: () => widget.onOpenFolder(done.outputDir),

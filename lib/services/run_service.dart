@@ -23,11 +23,15 @@ class RunService extends ChangeNotifier {
   StreamSubscription<String>? _outSub;
   StreamSubscription<String>? _errSub;
   RunTarget? _activeTarget;
+  String? _workingDirectory;
   bool _running = false;
   int? _exitCode;
 
   bool get isRunning => _running;
   RunTarget? get activeTarget => _activeTarget;
+
+  /// Folder the last command ran in.
+  String? get workingDirectory => _workingDirectory;
   int? get exitCode => _exitCode;
   List<String> get lines => List.unmodifiable(_lines);
 
@@ -229,6 +233,7 @@ class RunService extends ChangeNotifier {
 
     clear();
     _activeTarget = target;
+    _workingDirectory = workingDirectory;
     _append('\$ ${target.command}');
     _append('cwd: $workingDirectory');
     _append('— offline local process —');

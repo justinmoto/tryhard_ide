@@ -975,6 +975,8 @@ createRoot(document.getElementById('root')$bang).render(
       RegExp(r'imported by "([^"]+)"'),
       RegExp(r'''from ["']([^"']+)["']'''),
       RegExp(r'^\s*(\S+?\.[cm]?[jt]sx?)\s*\(\d+:\d+\)', multiLine: true),
+      // esbuild location line: `    src/app/page.tsx:1:9:`
+      RegExp(r'^\s*(\S+?\.[cm]?[jt]sx?):\d+:\d+:?\s*$', multiLine: true),
       RegExp(r'''((?:[A-Za-z]:)?[\\/][^\s"':()]+\.[cm]?[jt]sx?)(?=[:\s"')]|$)''', multiLine: true),
     ];
     final root = p.normalize(p.absolute(outputDir));
