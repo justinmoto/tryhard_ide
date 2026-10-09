@@ -41,6 +41,7 @@ dependencies:
   code_text_field: ^1.1.0
   highlight: ^0.7.0
   flutter_highlight: ^0.7.0
+  shared_preferences: ^2.5.3
 
 dev_dependencies:
   flutter_test:

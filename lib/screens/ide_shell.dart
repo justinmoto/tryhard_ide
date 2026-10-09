@@ -13,6 +13,7 @@ import '../services/file_resolver.dart';
 import '../services/folder_picker.dart';
 import '../services/ollama_service.dart';
 import '../services/run_service.dart';
+import '../services/workspace_prefs.dart';
 import '../theme/cursor_theme.dart';
 import '../theme/theme_controller.dart';
 import '../widgets/activity_bar.dart';
@@ -78,6 +79,24 @@ class _IdeShellState extends State<IdeShell> {
     super.initState();
     _editor.addListener(_onEditorChanged);
     _refreshOllama();
+    _restoreLastFolder();
+  }
+
+  Future<void> _restoreLastFolder() async {
+    if (kIsWeb) return;
+    final path = await WorkspacePrefs.loadLastFolder();
+    if (path == null || !mounted) return;
+    final dir = Directory(path);
+    if (!await dir.exists()) {
+      await WorkspacePrefs.clearLastFolder();
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      _rootPath = dir.path;
+      _sidebarOpen = true;
+      _activity = ActivityItem.explorer;
+    });
   }
 
   void _onEditorChanged() {
@@ -219,12 +238,55 @@ class _IdeShellState extends State<IdeShell> {
       _snack('Folders are desktop/mobile only.');
       return;
     }
+    if (_rootPath != null) {
+      final confirmed = await _confirmChangeFolder();
+      if (!confirmed || !mounted) return;
+    }
     final path = await FolderPicker.pick(initialDirectory: _rootPath);
     if (path == null) return;
-    await _openFolder(path);
+    await _openFolder(path, clearOpenFile: _rootPath != null);
   }
 
-  Future<void> _openFolder(String path) async {
+  Future<bool> _confirmChangeFolder() async {
+    final folderName = p.basename(_rootPath!);
+    final dirtyNote = _dirty
+        ? '\n\nYou have unsaved changes that will be discarded.'
+        : '';
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: CursorColors.panel,
+        title: Text(
+          'Change Folder?',
+          style: TextStyle(color: CursorColors.fgBright, fontSize: 16),
+        ),
+        content: Text(
+          'Open a different folder instead of "$folderName"? '
+          'The currently open file will be closed.$dirtyNote',
+          style: TextStyle(color: CursorColors.fg, fontSize: 13, height: 1.4),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text(
+              'Cancel',
+              style: TextStyle(color: CursorColors.fgMuted),
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(
+              'Change Folder',
+              style: TextStyle(color: CursorColors.accent),
+            ),
+          ),
+        ],
+      ),
+    );
+    return result == true;
+  }
+
+  Future<void> _openFolder(String path, {bool clearOpenFile = false}) async {
     if (kIsWeb) {
       _snack('Folders are desktop/mobile only.');
       return;
@@ -238,10 +300,21 @@ class _IdeShellState extends State<IdeShell> {
       // Touch-list to verify sandbox access after picker grant.
       dir.listSync(followLinks: false);
       setState(() {
+        if (clearOpenFile) {
+          _showEditorDiff = false;
+          _editorDiff = null;
+          _openPath = null;
+          _pathController.clear();
+          _selection = '';
+          _setEditorContent('', path: null);
+          _isImagePreview = false;
+          _dirty = false;
+        }
         _rootPath = dir.path;
         _sidebarOpen = true;
         _activity = ActivityItem.explorer;
       });
+      await WorkspacePrefs.saveLastFolder(dir.path);
     } catch (e) {
       _snack('Open folder failed: $e');
     }
