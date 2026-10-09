@@ -134,9 +134,16 @@ class _ChatSidebarState extends State<ChatSidebar> {
   void initState() {
     super.initState();
     _loadProjectFiles();
-    widget.repoIndex.open(widget.rootPath);
+    _syncRepoIndex();
     _loadSessions();
     _initSpeech();
+  }
+
+  Future<void> _syncRepoIndex() async {
+    await widget.repoIndex.open(widget.rootPath);
+    if (widget.rootPath != null) {
+      await widget.repoIndex.build();
+    }
   }
 
   Future<void> _initSpeech() async {
@@ -232,7 +239,7 @@ class _ChatSidebarState extends State<ChatSidebar> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.rootPath != widget.rootPath) {
       _loadProjectFiles();
-      widget.repoIndex.open(widget.rootPath);
+      _syncRepoIndex();
       _loadSessions();
     }
   }
@@ -307,6 +314,11 @@ class _ChatSidebarState extends State<ChatSidebar> {
     await ChatHistoryStore.save(widget.rootPath, _sessions);
   }
 
+  void _openSession(ChatSession session) {
+    if (_sending) _cancel();
+    setState(() => _restoreSession(session));
+  }
+
   static String _formatWhen(DateTime t) {
     final diff = DateTime.now().difference(t);
     if (diff.inMinutes < 1) return 'just now';
@@ -314,6 +326,16 @@ class _ChatSidebarState extends State<ChatSidebar> {
     if (diff.inDays < 1) return '${diff.inHours}h ago';
     if (diff.inDays < 7) return '${diff.inDays}d ago';
     return '${t.year}-${t.month.toString().padLeft(2, '0')}-${t.day.toString().padLeft(2, '0')}';
+  }
+
+  static String _historyGroup(DateTime t) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final day = DateTime(t.year, t.month, t.day);
+    if (day == today) return 'Today';
+    if (day == today.subtract(const Duration(days: 1))) return 'Yesterday';
+    if (now.difference(day).inDays < 7) return 'This week';
+    return 'Earlier';
   }
 
   void _scrollToEnd() {
@@ -822,154 +844,159 @@ Repository questions:
   }
 
   Widget _historyMenu() {
+    final saved = _sessions.where((s) => s.messages.isNotEmpty).toList();
+    final groups = <String, List<ChatSession>>{};
+    for (final s in saved) {
+      (groups[_historyGroup(s.updatedAt)] ??= []).add(s);
+    }
+    const order = ['Today', 'Yesterday', 'This week', 'Earlier'];
+
     return PopupMenuButton<String>(
       tooltip: 'Chat history',
+      offset: const Offset(0, 8),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: CursorColors.border),
+      ),
       color: CursorColors.panel,
+      elevation: 10,
       padding: EdgeInsets.zero,
-      constraints: const BoxConstraints(minWidth: 240, maxWidth: 320),
+      constraints: const BoxConstraints(
+        minWidth: 280,
+        maxWidth: 300,
+        maxHeight: 360,
+      ),
       onSelected: (id) {
         if (id == '__clear__') {
           _deleteAllHistory();
           return;
         }
-        final session = _sessions.where((s) => s.id == id).firstOrNull;
-        if (session == null) return;
-        if (_sending) _cancel();
-        setState(() => _restoreSession(session));
+        final session = saved.where((s) => s.id == id).firstOrNull;
+        if (session != null) _openSession(session);
       },
       itemBuilder: (context) {
-        final saved = _sessions.where((s) => s.messages.isNotEmpty).toList();
         if (saved.isEmpty) {
           return [
             PopupMenuItem<String>(
               enabled: false,
+              height: 56,
               child: Text(
-                'No saved chats for this folder yet',
+                'No saved chats yet',
                 style: TextStyle(color: CursorColors.fgDim, fontSize: 12),
               ),
             ),
           ];
         }
-        return [
-          for (final s in saved)
-            PopupMenuItem<String>(
-              value: s.id,
-              height: 40,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    s.title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: s.id == _session.id
-                          ? CursorColors.fgBright
-                          : CursorColors.fg,
-                      fontSize: 12,
-                      fontWeight: s.id == _session.id
-                          ? FontWeight.w600
-                          : FontWeight.normal,
-                    ),
-                  ),
-                  Text(
-                    '${_formatWhen(s.updatedAt)} · ${s.messages.where((m) => !m.isNote).length} messages',
-                    style: TextStyle(color: CursorColors.fgDim, fontSize: 10),
-                  ),
-                ],
-              ),
-            ),
-          const PopupMenuDivider(),
+
+        final items = <PopupMenuEntry<String>>[
           PopupMenuItem<String>(
-            value: '__clear__',
-            height: 32,
+            enabled: false,
+            height: 36,
             child: Text(
-              'Clear chat history',
-              style: TextStyle(color: CursorColors.statusOffline, fontSize: 12),
+              'History',
+              style: TextStyle(
+                color: CursorColors.fgBright,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
             ),
           ),
         ];
+
+        for (final group in order) {
+          final list = groups[group];
+          if (list == null || list.isEmpty) continue;
+          items.add(
+            PopupMenuItem<String>(
+              enabled: false,
+              height: 28,
+              child: Text(
+                group,
+                style: TextStyle(
+                  color: CursorColors.fgDim,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.5,
+                ),
+              ),
+            ),
+          );
+          for (final s in list) {
+            final active = s.id == _session.id;
+            final count = s.messages.where((m) => !m.isNote).length;
+            items.add(
+              PopupMenuItem<String>(
+                value: s.id,
+                height: 52,
+                child: Row(
+                  children: [
+                    Container(
+                      width: 3,
+                      height: 28,
+                      decoration: BoxDecoration(
+                        color: active ? CursorColors.accent : Colors.transparent,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Text(
+                            s.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: active
+                                  ? CursorColors.fgBright
+                                  : CursorColors.fg,
+                              fontSize: 12.5,
+                              fontWeight:
+                                  active ? FontWeight.w600 : FontWeight.w500,
+                            ),
+                          ),
+                          Text(
+                            '${_formatWhen(s.updatedAt)} · $count msg',
+                            style: TextStyle(
+                              color: CursorColors.fgDim,
+                              fontSize: 10.5,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (active)
+                      Icon(Icons.check, size: 14, color: CursorColors.accent),
+                  ],
+                ),
+              ),
+            );
+          }
+        }
+
+        items
+          ..add(const PopupMenuDivider())
+          ..add(
+            PopupMenuItem<String>(
+              value: '__clear__',
+              height: 36,
+              child: Text(
+                'Clear all history',
+                style: TextStyle(
+                  color: CursorColors.statusOffline,
+                  fontSize: 12,
+                ),
+              ),
+            ),
+          );
+        return items;
       },
       child: Padding(
         padding: const EdgeInsets.all(5),
         child: Icon(Icons.history, size: 15, color: CursorColors.fgMuted),
       ),
-    );
-  }
-
-  Widget _indexBar() {
-    return ListenableBuilder(
-      listenable: widget.repoIndex,
-      builder: (context, _) {
-        final index = widget.repoIndex;
-        final progress = index.busy && index.progressTotal > 0
-            ? index.progressDone / index.progressTotal
-            : null;
-        final warning = index.embedError;
-        return Container(
-          padding: const EdgeInsets.fromLTRB(12, 4, 6, 4),
-          decoration: BoxDecoration(
-            border: Border(bottom: BorderSide(color: CursorColors.border)),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Row(
-                children: [
-                  Icon(
-                    index.hasVectors ? Icons.hub_outlined : Icons.manage_search,
-                    size: 13,
-                    color: CursorColors.fgMuted,
-                  ),
-                  const SizedBox(width: 6),
-                  Expanded(
-                    child: Text(
-                      'Repo index: ${index.status}',
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(color: CursorColors.fgMuted, fontSize: 11),
-                    ),
-                  ),
-                  if (index.busy)
-                    _HeaderIcon(Icons.stop_circle_outlined, 'Stop indexing', index.cancel)
-                  else ...[
-                    _HeaderIcon(
-                      Icons.sync,
-                      index.isEmpty ? 'Index repo' : 'Update index (changed files)',
-                      () => index.build(),
-                    ),
-                    if (!index.isEmpty)
-                      _HeaderIcon(
-                        Icons.restart_alt,
-                        'Rebuild index from scratch',
-                        () => index.build(force: true),
-                      ),
-                  ],
-                ],
-              ),
-              if (index.busy) ...[
-                const SizedBox(height: 3),
-                LinearProgressIndicator(
-                  value: progress,
-                  minHeight: 2,
-                  backgroundColor: CursorColors.border,
-                  color: CursorColors.accent,
-                ),
-              ],
-              if (warning != null && !index.busy)
-                Padding(
-                  padding: const EdgeInsets.only(top: 2),
-                  child: Text(
-                    'Keyword search only — $warning',
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(color: CursorColors.fgDim, fontSize: 10),
-                  ),
-                ),
-            ],
-          ),
-        );
-      },
     );
   }
 
@@ -1015,13 +1042,16 @@ Repository questions:
                     setState(_startNewSession);
                   }),
                   _historyMenu(),
-                  _HeaderIcon(Icons.view_sidebar_outlined, 'Close', widget.onClose),
+                  _HeaderIcon(
+                    Icons.view_sidebar_outlined,
+                    'Close',
+                    widget.onClose,
+                  ),
                 ],
               ),
             ),
           ),
           Divider(height: 1, color: CursorColors.border),
-          if (widget.rootPath != null) _indexBar(),
           if (widget.rootPath == null)
             Container(
               width: double.infinity,
@@ -1053,7 +1083,8 @@ Repository questions:
                 itemBuilder: (context, index) {
                   if (_sending && index == _entries.length) {
                     return _StatusLine(
-                      label: _statusLabel.isEmpty ? 'Thinking…' : _statusLabel,
+                      label:
+                          _statusLabel.isEmpty ? 'Thinking…' : _statusLabel,
                       loading: true,
                       startedAt: _statusStartedAt,
                       formatDuration: _formatDuration,
@@ -1082,25 +1113,6 @@ Repository questions:
                 },
               ),
             ),
-            if (widget.rootPath != null)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(14, 0, 14, 6),
-                child: Row(
-                  children: [
-                    Icon(Icons.chevron_right, size: 14, color: CursorColors.fgDim),
-                    Text(
-                      '${_projectFiles.length} Files',
-                      style: TextStyle(color: CursorColors.fgMuted, fontSize: 11),
-                    ),
-                    const Spacer(),
-                    if (widget.selection.trim().isNotEmpty)
-                      Text(
-                        'Selection · ready',
-                        style: TextStyle(color: CursorColors.fgDim, fontSize: 11),
-                      ),
-                  ],
-                ),
-              ),
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
               child: _buildComposer(minLines: 2, maxLines: 6),
@@ -1238,29 +1250,17 @@ Repository questions:
                       : 'Repo context off',
                 ),
                 const SizedBox(width: 4),
-                Flexible(
-                  child: _ModelPicker(
-                    model: widget.ollama.chatModel,
-                    models: widget.models,
-                    shortName: _shortModelName,
-                    onChanged: widget.onModelChanged,
-                    onPull: _pulling ? null : _pullModel,
-                    pullingModel: _pullingModel,
-                    asText: true,
-                  ),
-                ),
-                Tooltip(
-                  message: 'Attach files',
-                  child: InkWell(
-                    onTap: kIsWeb ? null : _pickAttachments,
-                    borderRadius: BorderRadius.circular(4),
-                    child: Padding(
-                      padding: const EdgeInsets.all(5),
-                      child: Icon(
-                        Icons.attach_file,
-                        size: 16,
-                        color: CursorColors.fgMuted,
-                      ),
+                Expanded(
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: _ModelPicker(
+                      model: widget.ollama.chatModel,
+                      models: widget.models,
+                      shortName: _shortModelName,
+                      onChanged: widget.onModelChanged,
+                      onPull: _pulling ? null : _pullModel,
+                      pullingModel: _pullingModel,
+                      asText: true,
                     ),
                   ),
                 ),
@@ -1289,6 +1289,22 @@ Repository questions:
                         color: _listening
                             ? CursorColors.statusOffline
                             : CursorColors.fgMuted,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 2),
+                Tooltip(
+                  message: 'Attach files',
+                  child: InkWell(
+                    onTap: kIsWeb ? null : _pickAttachments,
+                    borderRadius: BorderRadius.circular(4),
+                    child: Padding(
+                      padding: const EdgeInsets.all(5),
+                      child: Icon(
+                        Icons.attach_file,
+                        size: 16,
+                        color: CursorColors.fgMuted,
                       ),
                     ),
                   ),

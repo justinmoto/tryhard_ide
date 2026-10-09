@@ -449,6 +449,7 @@ class _IdeShellState extends State<IdeShell> {
         _savedContent = content;
         _dirty = false;
       });
+      _refreshRepoIndex();
       _snack('Saved ${p.basename(path)}');
     } on FileSystemException catch (e) {
       final denied = '${e.osError}'.contains('Operation not permitted') ||
@@ -563,8 +564,14 @@ class _IdeShellState extends State<IdeShell> {
       });
     }
 
+    _refreshRepoIndex();
     _snack('Updated ${p.basename(path)} — viewing diff in editor');
     return result;
+  }
+
+  void _refreshRepoIndex() {
+    if (_rootPath == null) return;
+    _repoIndex.build();
   }
 
   void _keepEditorDiff() {
@@ -601,6 +608,7 @@ class _IdeShellState extends State<IdeShell> {
       _editorDiff = null;
       _selection = '';
     });
+    _refreshRepoIndex();
     _snack('Discarded — reverted ${p.basename(path)}');
   }
 
@@ -615,33 +623,94 @@ class _IdeShellState extends State<IdeShell> {
     });
   }
 
-  Widget _buildEditorBody() {
-    if (_openPath == null) {
-      return Center(
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            final logoSize = (constraints.maxWidth * 0.45)
-                .clamp(140.0, 320.0)
-                .clamp(0.0, constraints.maxHeight * 0.6);
-            return Column(
+  bool get _isAppleDesktop =>
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.macOS ||
+          defaultTargetPlatform == TargetPlatform.iOS);
+
+  Widget _emptyEditor() {
+    final mod = _isAppleDesktop ? '⌘' : 'Ctrl';
+    final shortcuts = <(String, List<String>)>[
+      ('Open Folder', [mod, 'O']),
+      (_runOpen ? 'Hide Run Panel' : 'Show Run Panel', [mod, 'J']),
+    ];
+
+    return Center(
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final logoSize = (constraints.maxWidth * 0.28)
+              .clamp(96.0, 180.0)
+              .clamp(0.0, constraints.maxHeight * 0.35);
+          return ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 360),
+            child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                ThemedLogo(size: logoSize, opacity: 0.85),
-                const SizedBox(height: 16),
-                Text(
-                  'Try Hard IDE',
-                  style: TextStyle(
-                    color: CursorColors.fgDim,
-                    fontSize: 28,
-                    fontWeight: FontWeight.w300,
-                    letterSpacing: 0.5,
-                  ),
-                ),
+                ThemedLogo(size: logoSize, opacity: 0.55),
+                const SizedBox(height: 36),
+                for (final row in shortcuts) ...[
+                  _shortcutRow(row.$1, row.$2),
+                  const SizedBox(height: 14),
+                ],
               ],
-            );
-          },
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _shortcutRow(String label, List<String> keys) {
+    return Row(
+      children: [
+        Expanded(
+          child: Text(
+            label,
+            style: TextStyle(
+              color: CursorColors.fgMuted,
+              fontSize: 13,
+              fontWeight: FontWeight.w400,
+            ),
+          ),
         ),
-      );
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (var i = 0; i < keys.length; i++) ...[
+              if (i > 0) const SizedBox(width: 4),
+              _keyCap(keys[i]),
+            ],
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _keyCap(String label) {
+    return Container(
+      constraints: const BoxConstraints(minWidth: 22, minHeight: 22),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+      decoration: BoxDecoration(
+        color: CursorColors.input,
+        borderRadius: BorderRadius.circular(5),
+        border: Border.all(color: CursorColors.border),
+      ),
+      alignment: Alignment.center,
+      child: Text(
+        label,
+        style: TextStyle(
+          color: CursorColors.fgMuted,
+          fontSize: label.length > 1 ? 11 : 12,
+          fontWeight: FontWeight.w500,
+          height: 1,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildEditorBody() {
+    if (_openPath == null) {
+      return _emptyEditor();
     }
     if (_isImagePreview) {
       return Center(
@@ -854,6 +923,8 @@ class _IdeShellState extends State<IdeShell> {
         const SingleActivator(LogicalKeyboardKey.keyS, control: true): _save,
         const SingleActivator(LogicalKeyboardKey.keyR, meta: true): _quickRun,
         const SingleActivator(LogicalKeyboardKey.keyR, control: true): _quickRun,
+        const SingleActivator(LogicalKeyboardKey.keyO, meta: true): _pickFolder,
+        const SingleActivator(LogicalKeyboardKey.keyO, control: true): _pickFolder,
         const SingleActivator(LogicalKeyboardKey.keyJ, meta: true): () {
           setState(() => _runOpen = !_runOpen);
         },

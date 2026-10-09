@@ -121,6 +121,8 @@ class RepoIndex extends ChangeNotifier {
   int _gen = 0;
 
   bool _busy = false;
+  bool _pendingBuild = false;
+  bool _pendingForce = false;
   String _status = 'Not indexed';
   int _progressDone = 0;
   int _progressTotal = 0;
@@ -152,6 +154,8 @@ class RepoIndex extends ChangeNotifier {
     _embedModel = null;
     _embedError = null;
     _busy = false;
+    _pendingBuild = false;
+    _pendingForce = false;
     _status = rootPath == null ? 'No folder open' : 'Not indexed';
     notifyListeners();
     if (rootPath == null) return;
@@ -179,17 +183,28 @@ class RepoIndex extends ChangeNotifier {
     if (!_busy) return;
     _gen++;
     _busy = false;
+    _pendingBuild = false;
+    _pendingForce = false;
     _status = '${_readyStatus()} (stopped)';
     notifyListeners();
     _save();
   }
 
   /// Index new/changed files and drop deleted ones. [force] re-reads all.
+  /// If a build is already running, queues another pass when it finishes.
   Future<void> build({bool force = false}) async {
     final root = _rootPath;
-    if (root == null || _busy) return;
+    if (root == null) return;
+    if (_busy) {
+      _pendingBuild = true;
+      _pendingForce = _pendingForce || force;
+      return;
+    }
     final gen = ++_gen;
     _busy = true;
+    _pendingBuild = false;
+    final useForce = force || _pendingForce;
+    _pendingForce = false;
     _embedError = null;
     _status = 'Scanning files…';
     _progressDone = 0;
@@ -199,7 +214,7 @@ class RepoIndex extends ChangeNotifier {
     try {
       final modelChanged =
           _embedModel != null && _embedModel != ollama.embedModel;
-      if (force || modelChanged) {
+      if (useForce || modelChanged) {
         _files = {};
         _chunks = [];
       }
@@ -259,6 +274,12 @@ class RepoIndex extends ChangeNotifier {
       if (gen == _gen) {
         _busy = false;
         notifyListeners();
+        if (_pendingBuild) {
+          final again = _pendingForce;
+          _pendingBuild = false;
+          _pendingForce = false;
+          build(force: again);
+        }
       }
     }
   }
