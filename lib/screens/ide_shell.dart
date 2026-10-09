@@ -17,6 +17,7 @@ import '../theme/cursor_theme.dart';
 import '../theme/theme_controller.dart';
 import '../widgets/activity_bar.dart';
 import '../widgets/chat_sidebar.dart';
+import '../widgets/editor_diff_view.dart';
 import '../widgets/file_explorer_sidebar.dart';
 import '../widgets/run_panel.dart';
 import '../widgets/search_sidebar.dart';
@@ -59,6 +60,8 @@ class _IdeShellState extends State<IdeShell> {
   bool _runOpen = false;
   bool _isImagePreview = false;
   bool _dirty = false;
+  bool _showEditorDiff = false;
+  ApplyEditResult? _editorDiff;
   ActivityItem _activity = ActivityItem.explorer;
 
   @override
@@ -271,6 +274,8 @@ class _IdeShellState extends State<IdeShell> {
 
   void _closeFile() {
     setState(() {
+      _showEditorDiff = false;
+      _editorDiff = null;
       _openPath = null;
       _pathController.clear();
       _selection = '';
@@ -343,23 +348,35 @@ class _IdeShellState extends State<IdeShell> {
       );
     }
 
-    if (isOpen) {
-      setState(() {
-        _setEditorContent(next!, path: path, markSaved: true);
-        _selection = '';
-      });
-    } else {
-      // Refresh explorer token by touching root; open file in editor.
-      await _openFile(path);
-    }
-
-    _snack('Updated ${p.basename(path)}');
-    return ApplyEditResult(
+    final result = ApplyEditResult(
       ok: true,
       path: path,
       oldContent: oldContent,
       newContent: next,
     );
+
+    if (isOpen) {
+      setState(() {
+        _setEditorContent(next!, path: path, markSaved: true);
+        _selection = '';
+        _editorDiff = result;
+        _showEditorDiff = true;
+      });
+    } else {
+      await _openFile(path);
+      if (!mounted) return result;
+      setState(() {
+        _editorDiff = result;
+        _showEditorDiff = true;
+      });
+    }
+
+    _snack('Updated ${p.basename(path)} — viewing diff in editor');
+    return result;
+  }
+
+  void _dismissEditorDiff() {
+    setState(() => _showEditorDiff = false);
   }
 
   void _onActivity(ActivityItem item) {
@@ -373,6 +390,84 @@ class _IdeShellState extends State<IdeShell> {
     });
   }
 
+  Widget _buildEditorBody() {
+    if (_openPath == null) {
+      return Center(
+        child: Text(
+          'Try Hard IDE',
+          style: TextStyle(
+            color: CursorColors.fgDim,
+            fontSize: 28,
+            fontWeight: FontWeight.w300,
+            letterSpacing: 0.5,
+          ),
+        ),
+      );
+    }
+    if (_isImagePreview) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Image.file(
+            File(_openPath!),
+            fit: BoxFit.contain,
+            errorBuilder: (context, error, stack) => Text(
+              'Could not preview image',
+              style: TextStyle(color: CursorColors.fgMuted),
+            ),
+          ),
+        ),
+      );
+    }
+
+    final diff = _editorDiff;
+    final showDiff = _showEditorDiff &&
+        diff != null &&
+        diff.ok &&
+        diff.path != null &&
+        p.equals(diff.path!, _openPath!);
+
+    if (showDiff) {
+      return EditorDiffView(
+        path: diff.path!,
+        oldContent: diff.oldContent ?? '',
+        newContent: diff.newContent ?? _editor.text,
+        onDone: _dismissEditorDiff,
+        onEditFile: _dismissEditorDiff,
+      );
+    }
+
+    return CodeTheme(
+      data: CodeThemeData(
+        styles: syntaxTheme(dark: CursorColors.isDark),
+      ),
+      child: CodeField(
+        controller: _editor,
+        focusNode: _editorFocus,
+        expands: true,
+        wrap: false,
+        background: CursorColors.editor,
+        cursorColor: CursorColors.accentSoft,
+        textStyle: TextStyle(
+          fontFamily: 'Menlo',
+          fontSize: 13,
+          color: CursorColors.fgBright,
+          height: 1.45,
+        ),
+        lineNumberStyle: LineNumberStyle(
+          width: 48,
+          textStyle: TextStyle(
+            color: CursorColors.fgDim,
+            fontSize: 12,
+            fontFamily: 'Menlo',
+          ),
+          background: CursorColors.editor,
+        ),
+        padding: const EdgeInsets.only(top: 8, bottom: 8),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     CursorColors.bindFrom(context);
@@ -384,61 +479,7 @@ class _IdeShellState extends State<IdeShell> {
         Expanded(
           child: ColoredBox(
             color: CursorColors.editor,
-            child: _openPath == null
-                ? Center(
-                    child: Text(
-                      'Try Hard IDE',
-                      style: TextStyle(
-                        color: CursorColors.fgDim,
-                        fontSize: 28,
-                        fontWeight: FontWeight.w300,
-                        letterSpacing: 0.5,
-                      ),
-                    ),
-                  )
-                : _isImagePreview
-                    ? Center(
-                        child: Padding(
-                          padding: const EdgeInsets.all(24),
-                          child: Image.file(
-                            File(_openPath!),
-                            fit: BoxFit.contain,
-                            errorBuilder: (context, error, stack) => Text(
-                              'Could not preview image',
-                              style: TextStyle(color: CursorColors.fgMuted),
-                            ),
-                          ),
-                        ),
-                      )
-                    : CodeTheme(
-                        data: CodeThemeData(
-                          styles: syntaxTheme(dark: CursorColors.isDark),
-                        ),
-                        child: CodeField(
-                          controller: _editor,
-                          focusNode: _editorFocus,
-                          expands: true,
-                          wrap: false,
-                          background: CursorColors.editor,
-                          cursorColor: CursorColors.accentSoft,
-                          textStyle: TextStyle(
-                            fontFamily: 'Menlo',
-                            fontSize: 13,
-                            color: CursorColors.fgBright,
-                            height: 1.45,
-                          ),
-                          lineNumberStyle: LineNumberStyle(
-                            width: 48,
-                            textStyle: TextStyle(
-                              color: CursorColors.fgDim,
-                              fontSize: 12,
-                              fontFamily: 'Menlo',
-                            ),
-                            background: CursorColors.editor,
-                          ),
-                          padding: const EdgeInsets.only(top: 8, bottom: 8),
-                        ),
-                      ),
+            child: _buildEditorBody(),
           ),
         ),
       ],
@@ -724,6 +765,10 @@ class _IdeShellState extends State<IdeShell> {
 
   Widget _tabBar() {
     final name = _fileName();
+    final diffActive = _showEditorDiff &&
+        _editorDiff?.path != null &&
+        _openPath != null &&
+        p.equals(_editorDiff!.path!, _openPath!);
     return Container(
       height: 35,
       color: CursorColors.tabInactive,
@@ -731,27 +776,34 @@ class _IdeShellState extends State<IdeShell> {
         children: [
           if (name != null)
             Container(
-              constraints: const BoxConstraints(minWidth: 120, maxWidth: 240),
+              constraints: const BoxConstraints(minWidth: 120, maxWidth: 280),
               height: 35,
               padding: const EdgeInsets.only(left: 12, right: 4),
               decoration: BoxDecoration(
                 color: CursorColors.tabActive,
                 border: Border(
-                  top: BorderSide(color: CursorColors.accent, width: 1),
+                  top: BorderSide(
+                    color: diffActive
+                        ? const Color(0xFF7DFFB3)
+                        : CursorColors.accent,
+                    width: 1,
+                  ),
                   right: BorderSide(color: CursorColors.border),
                 ),
               ),
               child: Row(
                 children: [
                   Icon(
-                    Icons.insert_drive_file_outlined,
+                    diffActive ? Icons.compare_arrows : Icons.insert_drive_file_outlined,
                     size: 13,
-                    color: CursorColors.fgMuted,
+                    color: diffActive
+                        ? const Color(0xFF7DFFB3)
+                        : CursorColors.fgMuted,
                   ),
                   SizedBox(width: 6),
                   Expanded(
                     child: Text(
-                      name,
+                      diffActive ? '$name (diff)' : name,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         color: CursorColors.fgBright,
@@ -760,6 +812,26 @@ class _IdeShellState extends State<IdeShell> {
                       ),
                     ),
                   ),
+                  if (_editorDiff != null &&
+                      _editorDiff!.ok &&
+                      _openPath != null &&
+                      p.equals(_editorDiff!.path!, _openPath!))
+                    Padding(
+                      padding: const EdgeInsets.only(right: 4),
+                      child: InkWell(
+                        onTap: () => setState(() => _showEditorDiff = !_showEditorDiff),
+                        child: Text(
+                          diffActive ? 'CODE' : 'DIFF',
+                          style: TextStyle(
+                            color: diffActive
+                                ? CursorColors.fgMuted
+                                : const Color(0xFF7DFFB3),
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ),
                   Tooltip(
                     message: _dirty ? 'Unsaved changes — Close' : 'Close',
                     child: InkWell(

@@ -60,7 +60,7 @@ Sidebar chat that knows the open file, the selection, and the project. Runs on a
 - [x] Ollama connection + status
 - [x] Chat with open file / selection context
 - [x] Prompt → find file in project (even if not open) → auto-apply to disk
-- [x] Red/green diff card + changed file path after apply
+- [x] Red/green diff in chat + in-editor DIFF view (toggle DIFF/CODE on tab)
 - [ ] Richer project-wide context (RAG)
 
 ### 2. Offline Codebase Q&A (RAG)
