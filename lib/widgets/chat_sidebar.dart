@@ -393,11 +393,21 @@ Repository questions:
 
   String _shortModelName(String name) {
     final colon = name.indexOf(':');
-    if (colon <= 0) return name;
+    if (colon <= 0) {
+      return name.length > 14 ? '${name.substring(0, 12)}…' : name;
+    }
     final base = name.substring(0, colon);
     final tag = name.substring(colon + 1);
-    if (tag == 'latest') return base;
-    return name.length > 22 ? '$base…' : name;
+    if (tag == 'latest') {
+      return base.length > 14 ? '${base.substring(0, 12)}…' : base;
+    }
+    // e.g. qwen2.5-coder:3b -> qwen…:3b
+    if (name.length <= 12) return name;
+    final keepBase = (10 - tag.length).clamp(3, 8);
+    final shortBase = base.length > keepBase
+        ? '${base.substring(0, keepBase)}…'
+        : base;
+    return '$shortBase:$tag';
   }
 
   Future<void> _copyText(String text) async {
@@ -1236,16 +1246,17 @@ Repository questions:
                       : 'Ask: answer without repo retrieval',
                 ),
                 const SizedBox(width: 4),
-                _ModelPicker(
-                  model: widget.ollama.chatModel,
-                  models: widget.models,
-                  shortName: _shortModelName,
-                  onChanged: widget.onModelChanged,
-                  onPull: _pulling ? null : _pullModel,
-                  pullingModel: _pullingModel,
-                  asText: true,
+                Flexible(
+                  child: _ModelPicker(
+                    model: widget.ollama.chatModel,
+                    models: widget.models,
+                    shortName: _shortModelName,
+                    onChanged: widget.onModelChanged,
+                    onPull: _pulling ? null : _pullModel,
+                    pullingModel: _pullingModel,
+                    asText: true,
+                  ),
                 ),
-                const Spacer(),
                 Tooltip(
                   message: 'Attach files',
                   child: InkWell(
@@ -1261,7 +1272,6 @@ Repository questions:
                     ),
                   ),
                 ),
-                const SizedBox(width: 2),
                 Tooltip(
                   message: _listening ? 'Stop listening' : 'Voice input',
                   child: InkWell(
@@ -1291,7 +1301,7 @@ Repository questions:
                     ),
                   ),
                 ),
-                const SizedBox(width: 4),
+                const SizedBox(width: 2),
                 Tooltip(
                   message: _sending ? 'Stop' : 'Send',
                   child: InkWell(
@@ -1595,6 +1605,8 @@ class _ModelPicker extends StatelessWidget {
         Flexible(
           child: Text(
             label,
+            maxLines: 1,
+            softWrap: false,
             overflow: TextOverflow.ellipsis,
             style: TextStyle(
               color: CursorColors.fg,
@@ -1608,7 +1620,7 @@ class _ModelPicker extends StatelessWidget {
     );
 
     return PopupMenuButton<String>(
-      tooltip: 'Model',
+      tooltip: models.isEmpty ? 'Model' : model,
       onSelected: (value) {
         if (value.startsWith('pull:')) {
           onPull?.call(value.substring(5));
@@ -1717,9 +1729,17 @@ class _ModelPicker extends StatelessWidget {
       child: asText
           ? Padding(
               padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 5),
-              child: child,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 100),
+                child: child,
+              ),
             )
-          : _Pill(child: child),
+          : _Pill(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 120),
+                child: child,
+              ),
+            ),
     );
   }
 }

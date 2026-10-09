@@ -137,6 +137,71 @@ class FileResolver {
     return out;
   }
 
+  /// Find files whose relative path or basename contains [query].
+  /// Returns absolute paths, best matches first (max [limit]).
+  static Future<List<String>> searchByName(
+    String? rootPath,
+    String query, {
+    int limit = 40,
+  }) async {
+    if (rootPath == null) return const [];
+    final q = query.trim().toLowerCase();
+    if (q.isEmpty) return const [];
+
+    final scored = <({String path, int score})>[];
+    await _collectNamed(Directory(rootPath), rootPath, q, scored, 0);
+    scored.sort((a, b) {
+      final byScore = b.score.compareTo(a.score);
+      if (byScore != 0) return byScore;
+      return a.path.compareTo(b.path);
+    });
+    return [
+      for (final s in scored.take(limit)) s.path,
+    ];
+  }
+
+  static Future<void> _collectNamed(
+    Directory dir,
+    String root,
+    String query,
+    List<({String path, int score})> out,
+    int depth,
+  ) async {
+    if (depth > 8 || out.length >= 200) return;
+    try {
+      final entities = await dir.list(followLinks: false).toList();
+      for (final entity in entities) {
+        final name = p.basename(entity.path);
+        if (entity is Directory) {
+          if (_skipDirs.contains(name) || name.startsWith('.')) continue;
+          await _collectNamed(entity, root, query, out, depth + 1);
+        } else if (entity is File) {
+          final rel = p.relative(entity.path, from: root);
+          final relLower = rel.toLowerCase();
+          final baseLower = name.toLowerCase();
+          if (!relLower.contains(query) && !baseLower.contains(query)) {
+            continue;
+          }
+          var score = 0;
+          if (baseLower == query) {
+            score = 100;
+          } else if (baseLower.startsWith(query)) {
+            score = 80;
+          } else if (baseLower.contains(query)) {
+            score = 60;
+          } else if (relLower.startsWith(query)) {
+            score = 40;
+          } else {
+            score = 20;
+          }
+          // Prefer shorter paths when scores tie later.
+          score -= (rel.length / 50).floor().clamp(0, 10);
+          out.add((path: entity.path, score: score));
+        }
+      }
+    } catch (_) {}
+  }
+
   static Future<void> _collect(
     Directory dir,
     String root,

@@ -39,6 +39,8 @@ class _IdeShellState extends State<IdeShell> {
   final _runService = RunService();
   late final CodeController _editor = CodeController();
   final _pathController = TextEditingController();
+  final _headerSearch = TextEditingController();
+  final _headerSearchFocus = FocusNode();
   final _editorFocus = FocusNode();
 
   static const _imageExts = {
@@ -75,13 +77,29 @@ class _IdeShellState extends State<IdeShell> {
   ActivityItem _activity = ActivityItem.explorer;
   double _sidebarWidth = _defaultSidebarWidth;
   double _chatWidth = _defaultChatWidth;
+  List<String> _fileHits = const [];
+  bool _fileSearchOpen = false;
+  int _fileSearchGen = 0;
 
   @override
   void initState() {
     super.initState();
     _editor.addListener(_onEditorChanged);
+    _headerSearchFocus.addListener(_onHeaderSearchFocus);
     _refreshOllama();
     _restoreLastFolder();
+  }
+
+  void _onHeaderSearchFocus() {
+    if (!_headerSearchFocus.hasFocus) {
+      // Delay so a result tap can register before the panel closes.
+      Future<void>.delayed(const Duration(milliseconds: 120), () {
+        if (!mounted || _headerSearchFocus.hasFocus) return;
+        setState(() => _fileSearchOpen = false);
+      });
+    } else if (_headerSearch.text.trim().isNotEmpty) {
+      _runFileSearch(_headerSearch.text);
+    }
   }
 
   Future<void> _restoreLastFolder() async {
@@ -123,10 +141,68 @@ class _IdeShellState extends State<IdeShell> {
     _editor.dispose();
     _editorFocus.dispose();
     _pathController.dispose();
+    _headerSearch.dispose();
+    _headerSearchFocus.removeListener(_onHeaderSearchFocus);
+    _headerSearchFocus.dispose();
     _runService.dispose();
     _repoIndex.cancel();
     _repoIndex.dispose();
     super.dispose();
+  }
+
+  Future<void> _runFileSearch(String raw) async {
+    final query = raw.trim();
+    if (_rootPath == null) {
+      setState(() {
+        _fileHits = const [];
+        _fileSearchOpen = query.isNotEmpty;
+      });
+      if (query.isNotEmpty) _snack('Open a folder to search files.');
+      return;
+    }
+    if (query.isEmpty) {
+      setState(() {
+        _fileHits = const [];
+        _fileSearchOpen = false;
+      });
+      return;
+    }
+    final gen = ++_fileSearchGen;
+    setState(() => _fileSearchOpen = true);
+    final hits = await FileResolver.searchByName(_rootPath, query);
+    if (!mounted || gen != _fileSearchGen) return;
+    setState(() {
+      _fileHits = hits;
+      _fileSearchOpen = true;
+    });
+  }
+
+  Future<void> _submitFileSearch([String? override]) async {
+    final query = (override ?? _headerSearch.text).trim();
+    if (query.isEmpty) return;
+    if (_rootPath == null) {
+      _snack('Open a folder to search files.');
+      return;
+    }
+    await _runFileSearch(query);
+    if (!mounted) return;
+    if (_fileHits.isEmpty) {
+      _snack('No files matching "$query"');
+      return;
+    }
+    if (_fileHits.length == 1) {
+      await _openFileHit(_fileHits.first);
+    }
+  }
+
+  Future<void> _openFileHit(String path) async {
+    _headerSearch.clear();
+    setState(() {
+      _fileHits = const [];
+      _fileSearchOpen = false;
+    });
+    _headerSearchFocus.unfocus();
+    await _openFile(path);
   }
 
   /// Open [path] (if not already open) and select lines [startLine]..[endLine].
@@ -777,23 +853,60 @@ class _IdeShellState extends State<IdeShell> {
           body: Column(
             children: [
               _titleBar(),
-              Expanded(child: workbench),
-              if (_runOpen)
-                SizedBox(
-                  height: 220,
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      border: Border(
-                        top: BorderSide(color: CursorColors.border),
+              Expanded(
+                child: Stack(
+                  children: [
+                    Column(
+                      children: [
+                        Expanded(child: workbench),
+                        if (_runOpen)
+                          SizedBox(
+                            height: 220,
+                            child: DecoratedBox(
+                              decoration: BoxDecoration(
+                                border: Border(
+                                  top: BorderSide(color: CursorColors.border),
+                                ),
+                              ),
+                              child: RunPanel(
+                                runService: _runService,
+                                rootPath: _rootPath,
+                                onClose: () => setState(() => _runOpen = false),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                    if (_fileSearchOpen) ...[
+                      Positioned.fill(
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: () {
+                            _headerSearchFocus.unfocus();
+                            setState(() => _fileSearchOpen = false);
+                          },
+                          child: const ColoredBox(
+                            color: Color(0x66000000),
+                          ),
+                        ),
                       ),
-                    ),
-                    child: RunPanel(
-                      runService: _runService,
-                      rootPath: _rootPath,
-                      onClose: () => setState(() => _runOpen = false),
-                    ),
-                  ),
+                      Align(
+                        alignment: Alignment.topCenter,
+                        child: Padding(
+                          padding: const EdgeInsets.only(top: 10),
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(
+                              maxWidth: 520,
+                              maxHeight: 380,
+                            ),
+                            child: _fileSearchPanel(),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
+              ),
               TransparencyPanel(
                 status: _status,
                 model: _ollama.chatModel,
@@ -803,6 +916,113 @@ class _IdeShellState extends State<IdeShell> {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  Widget _fileSearchPanel() {
+    final query = _headerSearch.text.trim();
+    return Material(
+      color: CursorColors.panel,
+      elevation: 12,
+      borderRadius: BorderRadius.circular(12),
+      clipBehavior: Clip.antiAlias,
+      child: Container(
+        width: 520,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: CursorColors.border),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
+              child: Text(
+                query.isEmpty ? 'Find file' : 'Files matching "$query"',
+                style: TextStyle(
+                  color: CursorColors.fgDim,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 320),
+              child: _fileHits.isEmpty
+                  ? Padding(
+                      padding: const EdgeInsets.fromLTRB(14, 4, 14, 14),
+                      child: Text(
+                        query.isEmpty
+                            ? 'Type a file name…'
+                            : 'No files matching "$query"',
+                        style: TextStyle(
+                          color: CursorColors.fgMuted,
+                          fontSize: 12,
+                        ),
+                      ),
+                    )
+                  : ListView.builder(
+                      shrinkWrap: true,
+                      padding: const EdgeInsets.only(bottom: 8),
+                      itemCount: _fileHits.length,
+                      itemBuilder: (context, index) {
+                        final path = _fileHits[index];
+                        final rel = _rootPath != null
+                            ? p.relative(path, from: _rootPath!)
+                            : path;
+                        final name = p.basename(path);
+                        final dir = p.dirname(rel);
+                        return InkWell(
+                          onTap: () => _openFileHit(path),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 7,
+                            ),
+                            child: Row(
+                              children: [
+                                Icon(
+                                  Icons.insert_drive_file_outlined,
+                                  size: 15,
+                                  color: CursorColors.fgMuted,
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text.rich(
+                                    TextSpan(
+                                      children: [
+                                        TextSpan(
+                                          text: name,
+                                          style: TextStyle(
+                                            color: CursorColors.fgBright,
+                                            fontSize: 13,
+                                          ),
+                                        ),
+                                        if (dir.isNotEmpty && dir != '.')
+                                          TextSpan(
+                                            text: '  $dir',
+                                            style: TextStyle(
+                                              color: CursorColors.fgDim,
+                                              fontSize: 12,
+                                            ),
+                                          ),
+                                      ],
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ],
         ),
       ),
     );
@@ -835,13 +1055,14 @@ class _IdeShellState extends State<IdeShell> {
                 child: SizedBox(
                   height: 26,
                   child: TextField(
-                    controller: _pathController,
+                    controller: _headerSearch,
+                    focusNode: _headerSearchFocus,
                     textAlign: TextAlign.center,
                     style: TextStyle(color: CursorColors.fg, fontSize: 12),
                     decoration: InputDecoration(
                       hintText: _rootPath != null
-                          ? p.basename(_rootPath!)
-                          : 'tryhard_ide',
+                          ? 'Find file in ${p.basename(_rootPath!)}'
+                          : 'Find file…',
                       hintStyle: TextStyle(
                         color: CursorColors.fgDim,
                         fontSize: 12,
@@ -875,7 +1096,8 @@ class _IdeShellState extends State<IdeShell> {
                         vertical: 4,
                       ),
                     ),
-                    onSubmitted: (_) => _openFile(),
+                    onChanged: _runFileSearch,
+                    onSubmitted: _submitFileSearch,
                   ),
                 ),
               ),

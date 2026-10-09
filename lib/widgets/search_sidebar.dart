@@ -29,17 +29,21 @@ class SearchSidebar extends StatefulWidget {
     super.key,
     required this.rootPath,
     required this.onOpenFile,
+    this.initialQuery = '',
+    this.searchToken = 0,
   });
 
   final String? rootPath;
   final ValueChanged<String> onOpenFile;
+  final String initialQuery;
+  final int searchToken;
 
   @override
   State<SearchSidebar> createState() => _SearchSidebarState();
 }
 
 class _SearchSidebarState extends State<SearchSidebar> {
-  final _search = TextEditingController();
+  late final _search = TextEditingController(text: widget.initialQuery);
   final _replace = TextEditingController();
   final _include = TextEditingController();
   final _exclude = TextEditingController(
@@ -57,6 +61,31 @@ class _SearchSidebarState extends State<SearchSidebar> {
   List<SearchHit> _hits = const [];
   String? _error;
   final _expandedFiles = <String>{};
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.initialQuery.trim().isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _runSearch();
+      });
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant SearchSidebar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.searchToken != widget.searchToken) {
+      _search.text = widget.initialQuery;
+      _search.selection = TextSelection.collapsed(
+        offset: _search.text.length,
+      );
+      _runSearch();
+    } else if (oldWidget.rootPath != widget.rootPath &&
+        _search.text.trim().isNotEmpty) {
+      _runSearch();
+    }
+  }
 
   static const _textExts = {
     '.dart', '.js', '.jsx', '.ts', '.tsx', '.json', '.md', '.txt', '.yaml',
