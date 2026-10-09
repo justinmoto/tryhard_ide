@@ -25,6 +25,7 @@ import '../widgets/run_panel.dart';
 import '../widgets/search_sidebar.dart';
 import '../widgets/themed_logo.dart';
 import '../widgets/top_toast.dart';
+import '../widgets/translate_sidebar.dart';
 import '../widgets/transparency_panel.dart';
 
 class IdeShell extends StatefulWidget {
@@ -36,6 +37,9 @@ class IdeShell extends StatefulWidget {
 
 class _IdeShellState extends State<IdeShell> {
   final _ollama = OllamaService();
+  // Separate client: OllamaService cancels its in-flight chat on each new
+  // request, so sharing one would let chat and conversions cancel each other.
+  final _convertOllama = OllamaService();
   late final _repoIndex = RepoIndex(_ollama);
   final _runService = RunService();
   late final CodeController _editor = CodeController();
@@ -574,6 +578,78 @@ class _IdeShellState extends State<IdeShell> {
     _repoIndex.build();
   }
 
+  /// Write a generated file (e.g. a translation) and show it as a diff.
+  Future<ApplyEditResult> _writeGenerated(String path, String content) async {
+    if (kIsWeb) return ApplyEditResult.fail('Writing files is desktop/mobile only.');
+    final file = File(path);
+    final created = !await file.exists();
+    String oldContent = '';
+    try {
+      if (!created) oldContent = await file.readAsString();
+      await file.parent.create(recursive: true);
+      await file.writeAsString(content, flush: true);
+    } catch (e) {
+      return ApplyEditResult.fail('Write failed: $e');
+    }
+    final result = ApplyEditResult(
+      ok: true,
+      path: path,
+      oldContent: oldContent,
+      newContent: content,
+      created: created,
+    );
+    if (!mounted) return result;
+    final isOpen = _openPath != null && p.equals(_openPath!, path);
+    if (!isOpen) await _openFile(path);
+    if (!mounted) return result;
+    setState(() {
+      if (isOpen) _setEditorContent(content, path: path, markSaved: true);
+      _selection = '';
+      _editorDiff = result;
+      _showEditorDiff = true;
+    });
+    _refreshRepoIndex();
+    return result;
+  }
+
+  /// Undo a written edit: restore old content, or delete a file it created.
+  Future<bool> _revertResult(ApplyEditResult result) async {
+    final path = result.path!;
+    try {
+      if (result.created) {
+        final f = File(path);
+        if (await f.exists()) await f.delete();
+      } else {
+        await File(path).writeAsString(result.oldContent ?? '', flush: true);
+      }
+    } catch (e) {
+      _snack('Discard failed: $e');
+      return false;
+    }
+    if (!mounted) return true;
+    setState(() {
+      if (_openPath != null && p.equals(_openPath!, path)) {
+        if (result.created) {
+          _openPath = null;
+          _pathController.clear();
+          _setEditorContent('', path: null);
+        } else {
+          _setEditorContent(result.oldContent ?? '', path: path, markSaved: true);
+        }
+      }
+      if (_editorDiff?.path == path) {
+        _showEditorDiff = false;
+        _editorDiff = null;
+      }
+      _selection = '';
+    });
+    _refreshRepoIndex();
+    _snack(result.created
+        ? 'Discarded — deleted ${p.basename(path)}'
+        : 'Discarded — reverted ${p.basename(path)}');
+    return true;
+  }
+
   void _keepEditorDiff() {
     setState(() {
       _showEditorDiff = false;
@@ -591,25 +667,7 @@ class _IdeShellState extends State<IdeShell> {
       });
       return;
     }
-    final path = diff.path!;
-    final previous = diff.oldContent ?? '';
-    try {
-      await File(path).writeAsString(previous, flush: true);
-    } catch (e) {
-      _snack('Discard failed: $e');
-      return;
-    }
-    if (!mounted) return;
-    setState(() {
-      if (_openPath != null && p.equals(_openPath!, path)) {
-        _setEditorContent(previous, path: path, markSaved: true);
-      }
-      _showEditorDiff = false;
-      _editorDiff = null;
-      _selection = '';
-    });
-    _refreshRepoIndex();
-    _snack('Discarded — reverted ${p.basename(path)}');
+    await _revertResult(diff);
   }
 
   void _onActivity(ActivityItem item) {
@@ -804,6 +862,28 @@ class _IdeShellState extends State<IdeShell> {
           onOpenFile: (path) => _openFile(path),
           onPickFolder: _pickFolder,
         ),
+      ActivityItem.convert => TranslateSidebar(
+          ollama: _convertOllama,
+          model: _ollama.chatModel,
+          rootPath: _rootPath,
+          openPath: _isImagePreview ? null : _openPath,
+          readFileContent: () => _editor.text,
+          runService: _runService,
+          writeFile: _writeGenerated,
+          onOpenFile: (path) => _openFile(path),
+          onOpenFileAt: _openFileAt,
+          onOpenFolder: (path) => _openFolder(path, clearOpenFile: true),
+          onRunCommand: (cwd, target) async {
+            setState(() => _runOpen = true);
+            if (_runService.isRunning) {
+              await _runService.stop();
+              for (var i = 0; i < 30 && _runService.isRunning; i++) {
+                await Future<void>.delayed(const Duration(milliseconds: 100));
+              }
+            }
+            await _runService.start(workingDirectory: cwd, target: target);
+          },
+        ),
     };
 
     final chat = ChatSidebar(
@@ -824,24 +904,9 @@ class _IdeShellState extends State<IdeShell> {
       onDiscardEdit: (result) async {
         if (_editorDiff?.path == result.path) {
           await _discardEditorDiff();
-        } else {
+        } else if (result.path != null) {
           // Discard a chat result that may not be the active editor diff.
-          final path = result.path;
-          if (path == null) return;
-          try {
-            await File(path).writeAsString(result.oldContent ?? '', flush: true);
-            if (!mounted) return;
-            if (_openPath != null && p.equals(_openPath!, path)) {
-              setState(() {
-                _setEditorContent(result.oldContent ?? '', path: path, markSaved: true);
-                _showEditorDiff = false;
-                _editorDiff = null;
-              });
-            }
-            _snack('Discarded — reverted ${p.basename(path)}');
-          } catch (e) {
-            _snack('Discard failed: $e');
-          }
+          await _revertResult(result);
         }
       },
       onKeepEdit: (result) {

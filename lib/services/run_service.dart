@@ -156,7 +156,7 @@ class RunService extends ChangeNotifier {
       final result = await Process.run(
         '/bin/zsh',
         const ['-lc', 'flutter devices --machine'],
-        environment: _staticEnrichedEnv(),
+        environment: enrichedEnv(),
       );
       if (result.exitCode != 0) return const [];
       final raw = (result.stdout as String).trim();
@@ -177,7 +177,9 @@ class RunService extends ChangeNotifier {
     }
   }
 
-  static Map<String, String> _staticEnrichedEnv() {
+  /// Process environment with common Node/Flutter install dirs on PATH
+  /// (GUI apps on macOS don't inherit the login shell's PATH).
+  static Map<String, String> enrichedEnv() {
     final env = Map<String, String>.from(Platform.environment);
     if (!Platform.isWindows) {
       final home = env['HOME'] ?? '';
@@ -292,7 +294,7 @@ class RunService extends ChangeNotifier {
     }
   }
 
-  Map<String, String> _enrichedEnv() => _staticEnrichedEnv();
+  Map<String, String> _enrichedEnv() => enrichedEnv();
 
   void _append(String line) {
     _lines.add(line);

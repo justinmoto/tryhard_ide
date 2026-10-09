@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import '../theme/cursor_theme.dart';
 import '../theme/theme_controller.dart';
 
-enum ActivityItem { explorer, search }
+enum ActivityItem { explorer, search, convert }
 
 class ActivityBar extends StatelessWidget {
   const ActivityBar({
@@ -44,6 +44,13 @@ class ActivityBar extends StatelessWidget {
             tooltip: 'Search',
             selected: explorerOpen && active == ActivityItem.search,
             onTap: () => onSelect(ActivityItem.search),
+            colors: c,
+          ),
+          _Item(
+            icon: Icons.translate,
+            tooltip: 'Convert (translate file / migrate framework)',
+            selected: explorerOpen && active == ActivityItem.convert,
+            onTap: () => onSelect(ActivityItem.convert),
             colors: c,
           ),
           const Spacer(),
