@@ -1213,7 +1213,7 @@ Repository questions:
                     ? 'Listening… speak your prompt'
                     : highlight
                         ? 'Drop files to attach as context…'
-                        : 'Plan, Build, / for skills, @ for context',
+                        : 'Ask — edit files, explain code, ship ideas…',
                 hintStyle: TextStyle(
                   color: CursorColors.fgDim,
                   fontSize: 13,
