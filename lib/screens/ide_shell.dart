@@ -23,6 +23,7 @@ import '../widgets/editor_diff_view.dart';
 import '../widgets/file_explorer_sidebar.dart';
 import '../widgets/run_panel.dart';
 import '../widgets/search_sidebar.dart';
+import '../widgets/themed_logo.dart';
 import '../widgets/top_toast.dart';
 import '../widgets/transparency_panel.dart';
 
@@ -617,14 +618,28 @@ class _IdeShellState extends State<IdeShell> {
   Widget _buildEditorBody() {
     if (_openPath == null) {
       return Center(
-        child: Text(
-          'Try Hard IDE',
-          style: TextStyle(
-            color: CursorColors.fgDim,
-            fontSize: 28,
-            fontWeight: FontWeight.w300,
-            letterSpacing: 0.5,
-          ),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final logoSize = (constraints.maxWidth * 0.45)
+                .clamp(140.0, 320.0)
+                .clamp(0.0, constraints.maxHeight * 0.6);
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ThemedLogo(size: logoSize, opacity: 0.85),
+                const SizedBox(height: 16),
+                Text(
+                  'Try Hard IDE',
+                  style: TextStyle(
+                    color: CursorColors.fgDim,
+                    fontSize: 28,
+                    fontWeight: FontWeight.w300,
+                    letterSpacing: 0.5,
+                  ),
+                ),
+              ],
+            );
+          },
         ),
       );
     }

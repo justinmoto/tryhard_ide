@@ -70,7 +70,7 @@ flutter:
   uses-material-design: true
 
   assets:
-    - logo.png
+    - assets/branding/
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

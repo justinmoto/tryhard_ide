@@ -16,6 +16,7 @@ import '../services/ollama_service.dart';
 import '../services/repo_index.dart';
 import '../theme/cursor_theme.dart';
 import 'diff_result_card.dart';
+import 'themed_logo.dart';
 
 typedef ApplyEditCallback = Future<ApplyEditResult> Function(
   EditProposal proposal, {
@@ -1123,16 +1124,7 @@ Repository questions:
             Center(
               child: Column(
                 children: [
-                  Image.asset(
-                    'logo.png',
-                    width: 36,
-                    height: 36,
-                    errorBuilder: (context, error, stackTrace) => Icon(
-                      Icons.auto_awesome,
-                      size: 28,
-                      color: CursorColors.fgMuted,
-                    ),
-                  ),
+                  const ThemedLogo(size: 56),
                   const SizedBox(height: 10),
                   Text(
                     'Try Hard IDE',
