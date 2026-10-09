@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tryhard_ide/services/edit_proposal.dart';
+import 'package:tryhard_ide/services/line_diff.dart';
 
 void main() {
   test('parses EDIT block and applies search/replace', () {
@@ -26,25 +27,12 @@ EDIT>>>
     );
   });
 
-  test('parses replace fence for selection', () {
-    const file = 'aaa BBB ccc';
-    const reply = '```replace\nXXX\n```';
-    final proposal = EditProposal.parse(
-      reply,
-      fileContent: file,
-      selection: 'BBB',
-    );
-    expect(proposal, isNotNull);
-    expect(proposal!.scope, EditScope.selection);
-    expect(proposal.applyTo(file), 'aaa XXX ccc');
-  });
-
-  test('parses dart fence as full file replace', () {
+  test('parses dart path fence as full file replace', () {
     const file = 'void main() {}';
     const reply = '''
-Here is a dashboard:
+File: lib/main.dart
 
-```dart
+```dart:lib/main.dart
 import 'package:flutter/material.dart';
 
 void main() {
@@ -60,6 +48,13 @@ void main() {
     );
     expect(proposal, isNotNull);
     expect(proposal!.scope, EditScope.file);
+    expect(proposal.targetHint, 'lib/main.dart');
     expect(proposal.applyTo(file), contains('runApp'));
+  });
+
+  test('line diff marks add and remove', () {
+    final lines = diffLines('a\nb\nc\n', 'a\nx\nc\n');
+    expect(lines.any((l) => l.op == DiffOp.remove && l.text == 'b'), isTrue);
+    expect(lines.any((l) => l.op == DiffOp.add && l.text == 'x'), isTrue);
   });
 }

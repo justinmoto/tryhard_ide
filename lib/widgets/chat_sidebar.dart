@@ -1,45 +1,88 @@
 import 'package:flutter/material.dart';
 
+import '../services/apply_edit_result.dart';
 import '../services/edit_proposal.dart';
+import '../services/file_resolver.dart';
 import '../services/ollama_service.dart';
 import '../theme/cursor_theme.dart';
+import 'diff_result_card.dart';
 
-typedef ApplyEditCallback = Future<bool> Function(EditProposal proposal);
+typedef ApplyEditCallback = Future<ApplyEditResult> Function(
+  EditProposal proposal, {
+  String? userPrompt,
+});
 
 class ChatSidebar extends StatefulWidget {
   const ChatSidebar({
     super.key,
     required this.ollama,
+    required this.rootPath,
+    required this.openPath,
     required this.openFileName,
     required this.selection,
     required this.fileContent,
     required this.onClose,
     required this.applyEdit,
+    required this.onOpenFile,
   });
 
   final OllamaService ollama;
+  final String? rootPath;
+  final String? openPath;
   final String? openFileName;
   final String selection;
   final String fileContent;
   final VoidCallback onClose;
   final ApplyEditCallback applyEdit;
+  final ValueChanged<String> onOpenFile;
 
   @override
   State<ChatSidebar> createState() => _ChatSidebarState();
 }
 
+class _ChatEntry {
+  _ChatEntry.text(this.message) : result = null;
+  _ChatEntry.diff(this.result) : message = null;
+
+  final ChatMessage? message;
+  final ApplyEditResult? result;
+}
+
 class _ChatSidebarState extends State<ChatSidebar> {
   final _controller = TextEditingController();
   final _scroll = ScrollController();
-  final _messages = <ChatMessage>[
-    const ChatMessage(
-      role: 'assistant',
-      content:
-          'Local AI ready. Open a file, select code, then ask me to change it — edits apply to the file automatically.',
+  final _entries = <_ChatEntry>[
+    _ChatEntry.text(
+      const ChatMessage(
+        role: 'assistant',
+        content:
+            'Local AI ready. Open a project folder — I can find files (e.g. main.dart) and auto-apply edits with a red/green diff.',
+      ),
     ),
   ];
   final _history = <ChatMessage>[];
   bool _sending = false;
+  List<String> _projectFiles = const [];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadProjectFiles();
+  }
+
+  @override
+  void didUpdateWidget(covariant ChatSidebar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.rootPath != widget.rootPath) {
+      _loadProjectFiles();
+    }
+  }
+
+  Future<void> _loadProjectFiles() async {
+    final files = await FileResolver.listProjectFiles(widget.rootPath);
+    if (!mounted) return;
+    setState(() => _projectFiles = files);
+  }
 
   @override
   void dispose() {
@@ -49,27 +92,21 @@ class _ChatSidebarState extends State<ChatSidebar> {
   }
 
   String get _systemPrompt => '''
-You are LocalForge, an on-device coding assistant that EDITS the open file.
-The IDE auto-applies your code to the file.
+You are LocalForge, an on-device coding assistant. You edit project files; the IDE finds the file and applies your code automatically (file does not need to be open).
 
-When changing code, output the FULL updated file inside a fenced code block, e.g.:
+When changing code, ALWAYS:
+1. Name the file on its own line: File: lib/main.dart
+2. Output the FULL updated file in a fenced block tagged with the path:
 
-```dart
-// complete file contents here
+```dart:lib/main.dart
+// complete file contents
 ```
 
-Or for a small patch use:
-
-<<<EDIT
-exact old code from the file
-===
-new code
-EDIT>>>
-
 Rules:
-- For "make me …", rewrite, or redesign requests: always return the complete file in a ```dart (or correct language) fence.
-- Keep a one-line explanation outside the fence.
-- If the user only asks a question, do not include a code fence.
+- Prefer paths from the project file list when provided.
+- For redesign / "make me …" requests, rewrite the whole target file.
+- One short explanation, then File: line, then the code fence.
+- If only answering a question, no code fence.
 - Never claim you need the internet.
 ''';
 
@@ -78,16 +115,25 @@ Rules:
     if (text.isEmpty || _sending) return;
 
     final contextBlock = StringBuffer();
-    if (widget.openFileName != null) {
-      contextBlock.writeln('Open file: ${widget.openFileName}');
+    if (widget.rootPath != null) {
+      contextBlock.writeln('Project root: ${widget.rootPath}');
+    }
+    if (_projectFiles.isNotEmpty) {
+      contextBlock.writeln('Project files:');
+      for (final f in _projectFiles.take(30)) {
+        contextBlock.writeln('- $f');
+      }
+    }
+    if (widget.openPath != null) {
+      contextBlock.writeln('Currently open: ${widget.openPath}');
     }
     if (widget.selection.trim().isNotEmpty) {
       contextBlock.writeln('Selection:\n```\n${widget.selection}\n```');
-    } else if (widget.fileContent.trim().isNotEmpty) {
-      final clipped = widget.fileContent.length > 6000
-          ? '${widget.fileContent.substring(0, 6000)}\n…'
+    } else if (widget.fileContent.trim().isNotEmpty && widget.openPath != null) {
+      final clipped = widget.fileContent.length > 5000
+          ? '${widget.fileContent.substring(0, 5000)}\n…'
           : widget.fileContent;
-      contextBlock.writeln('File contents:\n```\n$clipped\n```');
+      contextBlock.writeln('Open file contents:\n```\n$clipped\n```');
     }
 
     final userVisible = text;
@@ -97,7 +143,7 @@ Rules:
 
     setState(() {
       _sending = true;
-      _messages.add(ChatMessage(role: 'user', content: userVisible));
+      _entries.add(_ChatEntry.text(ChatMessage(role: 'user', content: userVisible)));
       _history.add(ChatMessage(role: 'user', content: userVisible));
       _controller.clear();
     });
@@ -116,36 +162,29 @@ Rules:
         trimmed,
         fileContent: widget.fileContent,
         selection: widget.selection,
-        // Auto-apply to whole file unless user highlighted a target.
-        preferFileReplace:
-            widget.selection.trim().isEmpty || wantsEdit,
+        preferFileReplace: widget.selection.trim().isEmpty || wantsEdit,
       );
 
       setState(() {
         _history.add(ChatMessage(role: 'assistant', content: trimmed));
-        _messages.add(ChatMessage(role: 'assistant', content: trimmed));
+        _entries.add(_ChatEntry.text(ChatMessage(role: 'assistant', content: trimmed)));
       });
 
       if (proposal != null) {
-        final ok = await widget.applyEdit(proposal);
+        final result = await widget.applyEdit(proposal, userPrompt: text);
         if (!mounted) return;
         setState(() {
-          _messages.add(
-            ChatMessage(
-              role: 'assistant',
-              content: ok
-                  ? '✓ Applied to the open file.'
-                  : 'Could not apply edit. Open a text file first, then ask again.',
-            ),
-          );
+          _entries.add(_ChatEntry.diff(result));
         });
-      } else if (_looksLikeEditRequest(text) && widget.openFileName != null) {
+      } else if (wantsEdit) {
         setState(() {
-          _messages.add(
-            const ChatMessage(
-              role: 'assistant',
-              content:
-                  'No editable block found. Try: select the code, then say exactly what to change (e.g. “rename greet to hello”).',
+          _entries.add(
+            _ChatEntry.text(
+              const ChatMessage(
+                role: 'assistant',
+                content:
+                    'No code block found to apply. Ask again and include the file name (e.g. lib/main.dart).',
+              ),
             ),
           );
         });
@@ -154,7 +193,7 @@ Rules:
       setState(() {
         final err = ChatMessage(role: 'assistant', content: 'Error: $e');
         _history.add(err);
-        _messages.add(err);
+        _entries.add(_ChatEntry.text(err));
       });
     } finally {
       setState(() => _sending = false);
@@ -174,7 +213,8 @@ Rules:
     const keys = [
       'change', 'fix', 'rename', 'refactor', 'rewrite', 'replace',
       'update', 'add', 'remove', 'delete', 'edit', 'make', 'convert',
-      'implement', 'improve', 'palitan', 'ayusin', 'gawin',
+      'implement', 'improve', 'palitan', 'ayusin', 'gawin', 'dashboard',
+      'create', 'build',
     ];
     return keys.any(t.contains);
   }
@@ -196,7 +236,7 @@ Rules:
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      widget.openFileName ?? 'New Chat',
+                      widget.openFileName ?? 'AI Edits',
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         color: CursorColors.fg,
@@ -208,31 +248,41 @@ Rules:
                   _HeaderIcon(Icons.add, 'New chat', () {
                     setState(() {
                       _history.clear();
-                      _messages
+                      _entries
                         ..clear()
                         ..add(
-                          const ChatMessage(
-                            role: 'assistant',
-                            content: 'New chat. How can I help?',
+                          _ChatEntry.text(
+                            const ChatMessage(
+                              role: 'assistant',
+                              content: 'New chat. How can I help?',
+                            ),
                           ),
                         );
                     });
                   }),
-                  _HeaderIcon(Icons.history, 'History', () {}),
-                  _HeaderIcon(Icons.more_horiz, 'More', () {}),
                   _HeaderIcon(Icons.view_sidebar_outlined, 'Close', widget.onClose),
                 ],
               ),
             ),
           ),
           Divider(height: 1, color: CursorColors.border),
-          if (widget.selection.trim().isNotEmpty)
+          if (widget.rootPath == null)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              color: const Color(0xFF3A2A1A),
+              child: Text(
+                'Open a project folder so I can find files to edit',
+                style: TextStyle(color: CursorColors.fgMuted, fontSize: 11),
+              ),
+            )
+          else if (widget.selection.trim().isNotEmpty)
             Container(
               width: double.infinity,
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
               color: CursorColors.hover,
               child: Text(
-                'Selection ready · AI edits can target it',
+                'Selection ready · edits can target it',
                 style: TextStyle(color: CursorColors.fgMuted, fontSize: 11),
               ),
             ),
@@ -240,9 +290,16 @@ Rules:
             child: ListView.builder(
               controller: _scroll,
               padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
-              itemCount: _messages.length,
+              itemCount: _entries.length,
               itemBuilder: (context, index) {
-                final msg = _messages[index];
+                final entry = _entries[index];
+                if (entry.result != null) {
+                  return DiffResultCard(
+                    result: entry.result!,
+                    onOpen: widget.onOpenFile,
+                  );
+                }
+                final msg = entry.message!;
                 final isUser = msg.role == 'user';
                 return Align(
                   alignment:
@@ -290,7 +347,7 @@ Rules:
                     maxLines: 5,
                     style: TextStyle(color: CursorColors.fgBright, fontSize: 13),
                     decoration: InputDecoration(
-                      hintText: 'Select code, then ask to change it…',
+                      hintText: 'e.g. rewrite lib/main.dart as a cafe dashboard…',
                       hintStyle: TextStyle(color: CursorColors.fgDim, fontSize: 13),
                       border: InputBorder.none,
                       contentPadding: const EdgeInsets.fromLTRB(12, 10, 12, 4),

@@ -59,8 +59,9 @@ Sidebar chat that knows the open file, the selection, and the project. Runs on a
 
 - [x] Ollama connection + status
 - [x] Chat with open file / selection context
-- [x] Prompt → auto-apply edit to open file/selection (saves to disk)
-- [ ] Richer project-wide context
+- [x] Prompt → find file in project (even if not open) → auto-apply to disk
+- [x] Red/green diff card + changed file path after apply
+- [ ] Richer project-wide context (RAG)
 
 ### 2. Offline Codebase Q&A (RAG)
 Index the repo with a local embedding model (`nomic-embed-text`) into LanceDB / sqlite-vec. Ask questions like “Where is auth handled?” Answers cite files and lines.

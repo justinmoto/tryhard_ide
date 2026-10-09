@@ -8,14 +8,25 @@ class EditProposal {
     required this.newText,
     this.oldText,
     this.summary,
+    this.targetHint,
   });
 
   final EditScope scope;
   final String newText;
   final String? oldText;
   final String? summary;
+  final String? targetHint;
 
-  /// Returns updated file contents, or null if apply failed.
+  EditProposal copyWith({String? targetHint}) {
+    return EditProposal(
+      scope: scope,
+      newText: newText,
+      oldText: oldText,
+      summary: summary,
+      targetHint: targetHint ?? this.targetHint,
+    );
+  }
+
   String? applyTo(String fileContent, {TextSelection? selection}) {
     switch (scope) {
       case EditScope.selection:
@@ -56,48 +67,70 @@ class EditProposal {
     required String selection,
     bool preferFileReplace = false,
   }) {
+    final pathHint = extractPathHint(reply);
+
     final block = _parseEditBlock(reply);
     if (block != null) {
       final oldText = block.$1;
       final newText = block.$2;
+      EditProposal proposal;
       if (oldText != null && oldText.trim().isNotEmpty) {
-        return EditProposal(
+        proposal = EditProposal(
           scope: EditScope.searchReplace,
           oldText: oldText,
           newText: newText,
           summary: 'Search/replace edit',
+          targetHint: pathHint,
         );
-      }
-      if (selection.isNotEmpty && !preferFileReplace) {
-        return EditProposal(
+      } else if (selection.isNotEmpty && !preferFileReplace) {
+        proposal = EditProposal(
           scope: EditScope.selection,
           oldText: selection,
           newText: newText,
           summary: 'Replace selection',
+          targetHint: pathHint,
+        );
+      } else {
+        proposal = EditProposal(
+          scope: EditScope.file,
+          newText: newText,
+          summary: 'Replace file',
+          targetHint: pathHint,
         );
       }
-      return EditProposal(
-        scope: EditScope.file,
-        newText: newText,
-        summary: 'Replace file',
+      return proposal;
+    }
+
+    final fence = _largestCodeFence(reply);
+    if (fence != null) {
+      return _fromCode(
+        fence.code,
+        fileContent,
+        selection,
+        preferFileReplace,
+        pathHint ?? fence.pathHint,
       );
     }
 
-    final labeled = _parseFence(
-      reply,
-      const ['replace', 'suggestion', 'edit', 'file'],
-    );
-    if (labeled != null) {
-      return _fromCode(labeled, fileContent, selection, preferFileReplace);
-    }
-
-    // Models often return ```dart / ```js — take the largest fence.
-    final anyFence = _largestCodeFence(reply);
-    if (anyFence != null) {
-      return _fromCode(anyFence, fileContent, selection, preferFileReplace);
-    }
-
     return null;
+  }
+
+  static String? extractPathHint(String reply) {
+    final fileLine = RegExp(
+      r'^(?:Changed|File|FILE|Path)\s*:\s*([^\s]+)',
+      caseSensitive: false,
+      multiLine: true,
+    ).firstMatch(reply);
+    if (fileLine != null) {
+      return fileLine
+          .group(1)!
+          .replaceAll('`', '')
+          .replaceAll('"', '')
+          .replaceAll("'", '');
+    }
+
+    final fence = _largestCodeFence(reply);
+    return fence?.pathHint;
   }
 
   static EditProposal _fromCode(
@@ -105,34 +138,48 @@ class EditProposal {
     String fileContent,
     String selection,
     bool preferFileReplace,
+    String? pathHint,
   ) {
-    final normalized = code.endsWith('\n') ? code : '$code\n';
+    var body = code;
+    // Allow first line: // FILE: lib/main.dart
+    final fileComment = RegExp(
+      r'''^\s*(?://|#|--)\s*FILE\s*:\s*([^\n]+)''',
+      caseSensitive: false,
+    ).firstMatch(body);
+    if (fileComment != null) {
+      pathHint ??= fileComment.group(1)?.trim();
+      body = body.substring(fileComment.end).replaceFirst(RegExp(r'^\n'), '');
+    }
 
-    // No selection → always write the whole open file (never fail apply).
+    final normalized = body.endsWith('\n') ? body : '$body\n';
+
     if (selection.trim().isEmpty || preferFileReplace) {
       return EditProposal(
         scope: EditScope.file,
         newText: normalized,
         summary: 'Replace entire file',
+        targetHint: pathHint,
       );
     }
 
-    final looksFullFile = _looksLikeFullFile(code) ||
-        code.length >= (fileContent.length * 0.35).clamp(80, 100000).toInt();
+    final looksFullFile = _looksLikeFullFile(body) ||
+        body.length >= (fileContent.length * 0.35).clamp(80, 100000).toInt();
 
     if (looksFullFile) {
       return EditProposal(
         scope: EditScope.file,
         newText: normalized,
         summary: 'Replace entire file',
+        targetHint: pathHint,
       );
     }
 
     return EditProposal(
       scope: EditScope.selection,
       oldText: selection,
-      newText: code,
+      newText: body,
       summary: 'Replace selection',
+      targetHint: pathHint,
     );
   }
 
@@ -176,24 +223,37 @@ class EditProposal {
     return null;
   }
 
-  static String? _parseFence(String reply, List<String> labels) {
-    final label = labels.map(RegExp.escape).join('|');
-    final re = RegExp(
-      '```(?:$label)\\s*\\n([\\s\\S]*?)\\n```',
-      caseSensitive: false,
-    );
-    final m = re.firstMatch(reply);
-    return m?.group(1);
-  }
-
-  static String? _largestCodeFence(String reply) {
-    final re = RegExp(r'```([a-zA-Z0-9_+-]*)\s*\n([\s\S]*?)```');
-    String? best;
+  static ({String code, String? pathHint})? _largestCodeFence(String reply) {
+    // ```dart:lib/main.dart or ```lib/main.dart or ```dart
+    final re = RegExp(r'```([^\n`]*)\n([\s\S]*?)```');
+    String? bestCode;
+    String? bestHint;
+    var bestLen = -1;
     for (final m in re.allMatches(reply)) {
+      final tag = (m.group(1) ?? '').trim();
       final body = (m.group(2) ?? '').trimRight();
       if (body.trim().length < 15) continue;
-      if (best == null || body.length > best.length) best = body;
+      if (body.length > bestLen) {
+        bestLen = body.length;
+        bestCode = body;
+        bestHint = _pathFromFenceTag(tag);
+      }
     }
-    return best;
+    if (bestCode == null) return null;
+    return (code: bestCode, pathHint: bestHint);
+  }
+
+  static String? _pathFromFenceTag(String tag) {
+    if (tag.isEmpty) return null;
+    // dart:lib/main.dart | tsx:src/App.tsx | lib/main.dart
+    if (tag.contains('/') || tag.contains('.')) {
+      final idx = tag.indexOf(':');
+      if (idx > 0 && idx < tag.length - 1) {
+        final after = tag.substring(idx + 1).trim();
+        if (after.contains('/') || after.contains('.')) return after;
+      }
+      if (tag.contains('.')) return tag;
+    }
+    return null;
   }
 }

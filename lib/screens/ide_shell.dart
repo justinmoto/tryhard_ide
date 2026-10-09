@@ -7,7 +7,9 @@ import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 
 import '../editor/syntax.dart';
+import '../services/apply_edit_result.dart';
 import '../services/edit_proposal.dart';
+import '../services/file_resolver.dart';
 import '../services/folder_picker.dart';
 import '../services/ollama_service.dart';
 import '../services/run_service.dart';
@@ -284,42 +286,80 @@ class _IdeShellState extends State<IdeShell> {
     showTopToast(context, message);
   }
 
-  Future<bool> _applyEdit(EditProposal proposal) async {
+  Future<ApplyEditResult> _applyEdit(
+    EditProposal proposal, {
+    String? userPrompt,
+  }) async {
     if (kIsWeb) {
-      _snack('Apply edit is desktop/mobile only.');
-      return false;
+      return ApplyEditResult.fail('Apply edit is desktop/mobile only.');
     }
-    if (_openPath == null || _isImagePreview) {
-      _snack('Open a text file first.');
-      return false;
-    }
-    final path = _openPath!;
-    var next = proposal.applyTo(
-      _editor.text,
-      selection: _editor.selection,
+
+    final path = await FileResolver.resolve(
+      rootPath: _rootPath,
+      hint: proposal.targetHint,
+      openPath: _openPath,
+      userPrompt: userPrompt,
     );
-    // Fallback: always write model code into the open file.
+    if (path == null) {
+      return ApplyEditResult.fail(
+        'Could not find target file. Open a folder / mention the filename (e.g. lib/main.dart).',
+      );
+    }
+
+    String oldContent = '';
+    try {
+      final file = File(path);
+      if (await file.exists()) {
+        oldContent = await file.readAsString();
+      }
+    } catch (e) {
+      return ApplyEditResult.fail('Could not read $path: $e');
+    }
+
+    final isOpen = _openPath != null &&
+        p.equals(_openPath!, path) &&
+        !_isImagePreview;
+    var next = proposal.applyTo(
+      isOpen ? _editor.text : oldContent,
+      selection: isOpen ? _editor.selection : null,
+    );
     next ??= proposal.newText;
     if (next.trim().isEmpty) {
-      _snack('Apply failed — empty edit.');
-      return false;
+      return ApplyEditResult.fail('Apply failed — empty edit.');
     }
-    setState(() {
-      _setEditorContent(next!, path: path, markSaved: false);
-      _selection = '';
-    });
+
     try {
       await File(path).writeAsString(next, flush: true);
-      if (!mounted) return true;
-      setState(() {
-        _savedContent = next!;
-        _dirty = false;
-      });
-      _snack('File updated on disk');
     } catch (e) {
-      _snack('Applied in editor, save failed: $e');
+      return ApplyEditResult.fail('Write failed: $e');
     }
-    return true;
+
+    if (!mounted) {
+      return ApplyEditResult(
+        ok: true,
+        path: path,
+        oldContent: oldContent,
+        newContent: next,
+      );
+    }
+
+    if (isOpen) {
+      setState(() {
+        _setEditorContent(next!, path: path, markSaved: true);
+        _selection = '';
+      });
+    } else {
+      // Refresh explorer token by touching root; open file in editor.
+      await _openFile(path);
+    }
+
+    _snack('Updated ${p.basename(path)}');
+    return ApplyEditResult(
+      ok: true,
+      path: path,
+      oldContent: oldContent,
+      newContent: next,
+    );
   }
 
   void _onActivity(ActivityItem item) {
@@ -432,11 +472,14 @@ class _IdeShellState extends State<IdeShell> {
 
     final chat = ChatSidebar(
       ollama: _ollama,
+      rootPath: _rootPath,
+      openPath: _openPath,
       openFileName: _fileName(),
       selection: _selection,
       fileContent: _editor.text,
       onClose: () => setState(() => _chatOpen = false),
       applyEdit: _applyEdit,
+      onOpenFile: (path) => _openFile(path),
     );
 
     final workbench = wide
