@@ -21,6 +21,13 @@ class ChatMessage {
   final String content;
 }
 
+class ChatCancelledException implements Exception {
+  const ChatCancelledException();
+
+  @override
+  String toString() => 'Chat cancelled';
+}
+
 class OllamaService {
   OllamaService({
     this.baseUrl = 'http://127.0.0.1:11434',
@@ -32,7 +39,15 @@ class OllamaService {
   String chatModel;
   final String embedModel;
 
+  http.Client? _activeChatClient;
+
   Uri _uri(String path) => Uri.parse('$baseUrl$path');
+
+  void cancelChat() {
+    final client = _activeChatClient;
+    _activeChatClient = null;
+    client?.close();
+  }
 
   Future<OllamaStatus> checkStatus() async {
     try {
@@ -61,27 +76,69 @@ class OllamaService {
     required List<ChatMessage> messages,
     String? model,
   }) async {
-    final response = await http
-        .post(
-          _uri('/api/chat'),
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({
-            'model': model ?? chatModel,
-            'stream': false,
-            'messages': [
-              for (final m in messages) {'role': m.role, 'content': m.content},
-            ],
-          }),
-        )
-        .timeout(const Duration(minutes: 2));
+    cancelChat();
+    final client = http.Client();
+    _activeChatClient = client;
+    try {
+      final response = await client
+          .post(
+            _uri('/api/chat'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'model': model ?? chatModel,
+              'stream': false,
+              'messages': [
+                for (final m in messages)
+                  {'role': m.role, 'content': m.content},
+              ],
+            }),
+          )
+          .timeout(const Duration(minutes: 2));
 
-    if (response.statusCode != 200) {
-      throw Exception('Ollama chat failed: HTTP ${response.statusCode}');
+      if (!identical(_activeChatClient, client)) {
+        throw const ChatCancelledException();
+      }
+
+      if (response.statusCode != 200) {
+        throw Exception(_formatHttpError('chat', response));
+      }
+
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      final message = data['message'] as Map<String, dynamic>?;
+      return message?['content'] as String? ?? '';
+    } catch (e) {
+      if (e is ChatCancelledException ||
+          !identical(_activeChatClient, client)) {
+        throw const ChatCancelledException();
+      }
+      rethrow;
+    } finally {
+      if (identical(_activeChatClient, client)) {
+        _activeChatClient = null;
+      }
+      client.close();
     }
+  }
 
-    final data = jsonDecode(response.body) as Map<String, dynamic>;
-    final message = data['message'] as Map<String, dynamic>?;
-    return message?['content'] as String? ?? '';
+  String _formatHttpError(String action, http.Response response) {
+    String detail = 'HTTP ${response.statusCode}';
+    try {
+      final data = jsonDecode(response.body);
+      if (data is Map && data['error'] != null) {
+        detail = '${data['error']}';
+      } else if (response.body.trim().isNotEmpty) {
+        detail = response.body.trim();
+      }
+    } catch (_) {
+      if (response.body.trim().isNotEmpty) {
+        detail = response.body.trim();
+      }
+    }
+    if (response.statusCode == 404 &&
+        detail.toLowerCase().contains('not found')) {
+      return 'Model "$chatModel" not found. Pull it with: ollama pull $chatModel';
+    }
+    return 'Ollama $action failed: $detail';
   }
 
   Future<List<double>> embed(String text) async {

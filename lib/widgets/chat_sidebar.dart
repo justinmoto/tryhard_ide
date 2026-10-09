@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../services/apply_edit_result.dart';
 import '../services/edit_proposal.dart';
@@ -62,6 +63,7 @@ class _ChatSidebarState extends State<ChatSidebar> {
   ];
   final _history = <ChatMessage>[];
   bool _sending = false;
+  int _requestGen = 0;
   List<String> _projectFiles = const [];
 
   @override
@@ -86,6 +88,8 @@ class _ChatSidebarState extends State<ChatSidebar> {
 
   @override
   void dispose() {
+    _requestGen++;
+    widget.ollama.cancelChat();
     _controller.dispose();
     _scroll.dispose();
     super.dispose();
@@ -110,9 +114,64 @@ Rules:
 - Never claim you need the internet.
 ''';
 
+  void _cancel() {
+    if (!_sending) return;
+    _requestGen++;
+    widget.ollama.cancelChat();
+    setState(() => _sending = false);
+  }
+
   Future<void> _send() async {
     final text = _controller.text.trim();
     if (text.isEmpty || _sending) return;
+
+    final status = await widget.ollama.checkStatus();
+    if (!mounted) return;
+    if (!status.online) {
+      setState(() {
+        _entries.add(
+          _ChatEntry.text(
+            ChatMessage(
+              role: 'assistant',
+              content:
+                  'Ollama is offline${status.error != null ? ': ${status.error}' : ''}. Start it, then try again.',
+            ),
+          ),
+        );
+      });
+      return;
+    }
+    if (status.models.isEmpty) {
+      setState(() {
+        _entries.add(
+          _ChatEntry.text(
+            ChatMessage(
+              role: 'assistant',
+              content:
+                  'No Ollama models installed. In a terminal run:\n\nollama pull ${widget.ollama.chatModel}',
+            ),
+          ),
+        );
+      });
+      return;
+    }
+    if (!status.models.contains(widget.ollama.chatModel)) {
+      setState(() {
+        _entries.add(
+          _ChatEntry.text(
+            ChatMessage(
+              role: 'assistant',
+              content:
+                  'Model "${widget.ollama.chatModel}" is not installed. '
+                  'Pick one from the status bar, or run:\n\n'
+                  'ollama pull ${widget.ollama.chatModel}\n\n'
+                  'Available: ${status.models.join(', ')}',
+            ),
+          ),
+        );
+      });
+      return;
+    }
 
     final contextBlock = StringBuffer();
     if (widget.rootPath != null) {
@@ -141,6 +200,7 @@ Rules:
         ? text
         : '$text\n\n---\nProject context:\n$contextBlock';
 
+    final gen = ++_requestGen;
     setState(() {
       _sending = true;
       _entries.add(_ChatEntry.text(ChatMessage(role: 'user', content: userVisible)));
@@ -156,6 +216,8 @@ Rules:
       ];
 
       final reply = await widget.ollama.chat(messages: messages);
+      if (!mounted || gen != _requestGen) return;
+
       final trimmed = reply.trim();
       final wantsEdit = _looksLikeEditRequest(text);
       final proposal = EditProposal.parse(
@@ -172,7 +234,7 @@ Rules:
 
       if (proposal != null) {
         final result = await widget.applyEdit(proposal, userPrompt: text);
-        if (!mounted) return;
+        if (!mounted || gen != _requestGen) return;
         setState(() {
           _entries.add(_ChatEntry.diff(result));
         });
@@ -189,14 +251,19 @@ Rules:
           );
         });
       }
+    } on ChatCancelledException {
+      // Stopped by user — keep the user message, no error bubble.
     } catch (e) {
+      if (!mounted || gen != _requestGen) return;
       setState(() {
         final err = ChatMessage(role: 'assistant', content: 'Error: $e');
         _history.add(err);
         _entries.add(_ChatEntry.text(err));
       });
     } finally {
-      setState(() => _sending = false);
+      if (mounted && gen == _requestGen) {
+        setState(() => _sending = false);
+      }
       await Future<void>.delayed(const Duration(milliseconds: 50));
       if (_scroll.hasClients) {
         _scroll.animateTo(
@@ -341,18 +408,42 @@ Rules:
               ),
               child: Column(
                 children: [
-                  TextField(
-                    controller: _controller,
-                    minLines: 2,
-                    maxLines: 5,
-                    style: TextStyle(color: CursorColors.fgBright, fontSize: 13),
-                    decoration: InputDecoration(
-                      hintText: 'e.g. rewrite lib/main.dart as a cafe dashboard…',
-                      hintStyle: TextStyle(color: CursorColors.fgDim, fontSize: 13),
-                      border: InputBorder.none,
-                      contentPadding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+                  Focus(
+                    onKeyEvent: (node, event) {
+                      if (event is! KeyDownEvent) {
+                        return KeyEventResult.ignored;
+                      }
+                      final isEnter =
+                          event.logicalKey == LogicalKeyboardKey.enter ||
+                          event.logicalKey == LogicalKeyboardKey.numpadEnter;
+                      if (!isEnter) return KeyEventResult.ignored;
+                      if (HardwareKeyboard.instance.isShiftPressed) {
+                        return KeyEventResult.ignored;
+                      }
+                      _send();
+                      return KeyEventResult.handled;
+                    },
+                    child: TextField(
+                      controller: _controller,
+                      minLines: 2,
+                      maxLines: 5,
+                      textInputAction: TextInputAction.newline,
+                      style: TextStyle(
+                        color: CursorColors.fgBright,
+                        fontSize: 13,
+                      ),
+                      decoration: InputDecoration(
+                        hintText:
+                            'e.g. rewrite lib/main.dart as a cafe dashboard…',
+                        hintStyle: TextStyle(
+                          color: CursorColors.fgDim,
+                          fontSize: 13,
+                        ),
+                        border: InputBorder.none,
+                        contentPadding:
+                            const EdgeInsets.fromLTRB(12, 10, 12, 4),
+                      ),
                     ),
-                    onSubmitted: (_) => _send(),
                   ),
                   Padding(
                     padding: const EdgeInsets.fromLTRB(6, 0, 6, 6),
@@ -372,31 +463,24 @@ Rules:
                           ),
                         ),
                         const SizedBox(width: 8),
-                        InkWell(
-                          onTap: _sending ? null : _send,
-                          borderRadius: BorderRadius.circular(6),
-                          child: Container(
-                            width: 28,
-                            height: 28,
-                            decoration: BoxDecoration(
-                              color: _sending
-                                  ? CursorColors.hover
-                                  : CursorColors.accent,
-                              borderRadius: BorderRadius.circular(6),
+                        Tooltip(
+                          message: _sending ? 'Stop' : 'Send',
+                          child: InkWell(
+                            onTap: _sending ? _cancel : _send,
+                            borderRadius: BorderRadius.circular(6),
+                            child: Container(
+                              width: 28,
+                              height: 28,
+                              decoration: BoxDecoration(
+                                color: CursorColors.accent,
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Icon(
+                                _sending ? Icons.stop_rounded : Icons.arrow_upward,
+                                size: 16,
+                                color: Colors.white,
+                              ),
                             ),
-                            child: _sending
-                                ? const Padding(
-                                    padding: EdgeInsets.all(6),
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                      color: Colors.white,
-                                    ),
-                                  )
-                                : const Icon(
-                                    Icons.arrow_upward,
-                                    size: 16,
-                                    color: Colors.white,
-                                  ),
                           ),
                         ),
                       ],

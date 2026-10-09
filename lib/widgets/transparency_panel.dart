@@ -38,7 +38,11 @@ class TransparencyPanel extends StatelessWidget {
           ),
           const SizedBox(width: 6),
           Text(
-            online ? 'on-device' : 'ollama offline',
+            !online
+                ? 'ollama offline'
+                : models.isEmpty
+                    ? 'no models'
+                    : 'on-device',
             style: const TextStyle(
               color: Colors.white,
               fontSize: 11,
@@ -59,8 +63,9 @@ class TransparencyPanel extends StatelessWidget {
             const SizedBox(width: 14),
           ],
           PopupMenuButton<String>(
-            tooltip: 'Model',
+            tooltip: models.isEmpty ? 'No models installed' : 'Model',
             onSelected: onModelChanged,
+            enabled: models.isNotEmpty,
             color: c.panel,
             itemBuilder: (context) => [
               for (final name in models)
@@ -73,7 +78,7 @@ class TransparencyPanel extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  model,
+                  models.isEmpty ? 'pull a model' : model,
                   style: const TextStyle(color: Colors.white, fontSize: 11),
                 ),
                 const Icon(Icons.arrow_drop_down, size: 14, color: Colors.white70),
